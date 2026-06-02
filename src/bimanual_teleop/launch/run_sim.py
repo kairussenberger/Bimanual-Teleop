@@ -69,6 +69,25 @@ def _start_tunnel() -> subprocess.Popen | None:
     return proc
 
 
+def _lan_ip() -> str:
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "<your-LAN-IP>"
+    finally:
+        s.close()
+
+
+def _print_lan_url() -> None:
+    ip = _lan_ip()
+    print("\n" + "=" * 64 + f"\n  OPEN THIS EXACT URL ON THE QUEST 3 BROWSER:\n    https://{ip}:8012\n"
+          + "  (NOT the vuer.ai?ws=... line above — that one 502s / won't connect.)\n"
+          + "  Accept the cert warning, Enter VR, raise your hands.\n" + "=" * 64 + "\n", flush=True)
+
+
 def run_viewer(args) -> int:
     import mujoco.viewer
     rig = load_rig()
@@ -79,6 +98,8 @@ def run_viewer(args) -> int:
         rig["vr"]["transport"] = "vuer"
         rig["vr"]["tunnel"] = True
         tunnel = _start_tunnel()
+    elif (args.vr == "vuer") or rig["vr"].get("transport") == "vuer":
+        _print_lan_url()
     world = SimWorld(rig)
     engine = TeleopEngine(rig, world)
     supervisor = Supervisor(rig, AlwaysOn())
