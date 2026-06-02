@@ -54,6 +54,7 @@ class VuerVRSource(VRSource):
         # campus Wi-Fi, no self-signed cert warning). Else: HTTPS on the LAN.
         self.tunnel = bool(v.get("tunnel", False))
         self.debug = bool(v.get("debug", debug))
+        self._dbg = {"hand": 0, "cam": 0, "ctrl": 0, "last": ""}
         self._lock = threading.Lock()
         self._frame = VRFrame(hands={s: HandSample() for s in SIDES})
         self._thread: threading.Thread | None = None
@@ -106,25 +107,32 @@ class VuerVRSource(VRSource):
         @app.add_handler("HAND_MOVE")
         async def on_hand(event, session):
             val = event.value or {}
-            if self.debug:
-                lk = val.get("left")
-                print("HAND_MOVE keys:", list(val.keys()),
-                      "| left floats:", (len(lk) if lk is not None else None), flush=True)
+            self._dbg["hand"] += 1
+            lk = val.get("left")
+            self._dbg["last"] = f"keys={list(val.keys())} left={len(lk) if lk is not None else None}"
             self._update_hand("left", val.get("left"), val.get("leftState"))
             self._update_hand("right", val.get("right"), val.get("rightState"))
 
         @app.add_handler("CAMERA_MOVE")
         async def on_cam(event, session):
+            self._dbg["cam"] += 1
             cam = (event.value or {}).get("camera", {})
             if cam.get("matrix") is not None:
                 with self._lock:
                     self._frame = dataclasses.replace(self._frame, head=_mat4(cam["matrix"]))
 
+        @app.add_handler("CONTROLLER_MOVE")
+        async def on_ctrl(event, session):
+            self._dbg["ctrl"] += 1
+
         @app.spawn(start=True)
         async def main(session, fps=72):
+            print("[vuer] >>> QUEST CONNECTED — entered the page <<<", flush=True)
             session.upsert @ Hands(stream=True, key="hands")
             import asyncio
             while True:
-                await asyncio.sleep(1.0)
-
-        app.run()
+                await asyncio.sleep(2.0)
+                if self.debug:
+                    d = self._dbg
+                    print(f"[vuer] head_msgs={d['cam']} hand_msgs={d['hand']} "
+                          f"controller_msgs={d['ctrl']} | last_hand: {d['last'] or '(none)'}", flush=True)
