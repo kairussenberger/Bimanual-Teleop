@@ -13,6 +13,10 @@ the same TeleopEngine + controllers — see launch/run_hw.py.
 from __future__ import annotations
 
 import argparse
+import re
+import shutil
+import subprocess
+import threading
 import time
 
 from ..config import SIDES, load_rig
@@ -46,11 +50,35 @@ def run_gif(args) -> int:
     return 0
 
 
+def _start_tunnel() -> subprocess.Popen | None:
+    """Spawn a cloudflared quick tunnel to the local HTTP Vuer server and print
+    the public https URL to paste on the Quest. No account needed."""
+    if not shutil.which("cloudflared"):
+        print("!! cloudflared not found — run: brew install cloudflared")
+        return None
+    proc = subprocess.Popen(["cloudflared", "tunnel", "--url", "http://localhost:8012"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+    def watch():
+        for line in proc.stdout:
+            m = re.search(r"https://[-\w.]+\.trycloudflare\.com", line)
+            if m:
+                print("\n" + "=" * 64 + f"\n  OPEN THIS ON THE QUEST 3 BROWSER:\n    {m.group(0)}\n"
+                      + "  (then Enter VR and raise your hands)\n" + "=" * 64 + "\n", flush=True)
+    threading.Thread(target=watch, daemon=True).start()
+    return proc
+
+
 def run_viewer(args) -> int:
     import mujoco.viewer
     rig = load_rig()
     if args.vr:
         rig["vr"]["transport"] = args.vr
+    tunnel = None
+    if args.tunnel:
+        rig["vr"]["transport"] = "vuer"
+        rig["vr"]["tunnel"] = True
+        tunnel = _start_tunnel()
     world = SimWorld(rig)
     engine = TeleopEngine(rig, world)
     supervisor = Supervisor(rig, AlwaysOn())
@@ -67,12 +95,16 @@ def run_viewer(args) -> int:
                 time.sleep(1 / 120)
     finally:
         src.stop()
+        if tunnel is not None:
+            tunnel.terminate()
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--vr", choices=["fake", "vuer"], help="override vr.transport")
+    ap.add_argument("--tunnel", action="store_true",
+                    help="serve over a public cloudflared HTTPS URL (works on isolated/campus Wi-Fi)")
     ap.add_argument("--gif", metavar="PATH", help="headless: render a GIF and exit")
     ap.add_argument("--seconds", type=float, default=6.0)
     ap.add_argument("--fps", type=float, default=60.0)

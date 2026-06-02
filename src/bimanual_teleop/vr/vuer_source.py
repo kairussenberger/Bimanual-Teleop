@@ -49,7 +49,10 @@ class VuerVRSource(VRSource):
         v = rig.get("vr", {})
         self.cert = v.get("cert_file", "cert.pem")
         self.key = v.get("key_file", "key.pem")
-        self.use_ngrok = bool(v.get("ngrok", False))
+        # tunnel mode: serve plain HTTP on localhost; a cloudflared/ngrok tunnel
+        # provides the public HTTPS the Quest connects to (works on isolated
+        # campus Wi-Fi, no self-signed cert warning). Else: HTTPS on the LAN.
+        self.tunnel = bool(v.get("tunnel", False))
         self.debug = debug
         self._lock = threading.Lock()
         self._frame = VRFrame(hands={s: HandSample() for s in SIDES})
@@ -94,10 +97,10 @@ class VuerVRSource(VRSource):
         from vuer import Vuer
         from vuer.schemas import Hands
 
-        kw = {}
-        if not self.use_ngrok:
-            kw = {"cert": self.cert, "key": self.key, "host": "0.0.0.0"}
-        app = Vuer(**kw)
+        if self.tunnel:
+            app = Vuer(host="127.0.0.1")                                  # http; tunnel adds https
+        else:
+            app = Vuer(cert=self.cert, key=self.key, host="0.0.0.0")      # https on the LAN
         self._app = app
 
         @app.add_handler("HAND_MOVE")

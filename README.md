@@ -64,10 +64,20 @@ mkcert <YOUR-PC-LAN-IP>          # writes cert.pem / key.pem (point rig.yaml at 
 uv run mjpython -m bimanual_teleop.launch.run_sim --vr vuer
 ```
 
-On the Quest, open `https://<YOUR-PC-LAN-IP>:8012` in the browser, accept the cert,
-enter immersive mode, and raise your hands. (Or set `vr.ngrok: true` in `rig.yaml`
-to tunnel instead of using a cert.) The arms follow your wrists; your fingers drive
-the ORCA hands.
+On the Quest, open `https://<YOUR-PC-LAN-IP>:8012`, accept the self-signed cert,
+enter immersive mode, and raise your hands. The arms follow your wrists; your
+fingers drive the ORCA hands.
+
+**On an isolated network (eduroam / campus / most managed Wi-Fi) the LAN route
+will NOT work** — the access point blocks device-to-device traffic. Use the public
+tunnel instead (no account, works on any network incl. cellular):
+
+```sh
+brew install cloudflared
+uv run mjpython -m bimanual_teleop.launch.run_sim --tunnel
+# wait ~5 s for the banner, then open the printed https://<...>.trycloudflare.com
+# URL on the Quest. (Fallback: run scripts/vr_tunnel.sh in a 2nd terminal.)
+```
 
 ## Tuning (do this once for your rig)
 
