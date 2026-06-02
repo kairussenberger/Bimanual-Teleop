@@ -13,6 +13,7 @@ the same TeleopEngine + controllers — see launch/run_hw.py.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -69,6 +70,21 @@ def _start_tunnel() -> subprocess.Popen | None:
     return proc
 
 
+def _free_port(port: int = 8012) -> None:
+    """Kill any leftover process holding the Vuer port — a stuck server from a
+    previous run / Ctrl+C / headset hang is the usual 'doesn't connect' cause."""
+    try:
+        pids = subprocess.run(["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True).stdout.split()
+    except FileNotFoundError:
+        return
+    for pid in pids:
+        try:
+            os.kill(int(pid), 9)
+            print(f"(freed port {port}: killed stale pid {pid})", flush=True)
+        except (ProcessLookupError, ValueError, PermissionError):
+            pass
+
+
 def _lan_ip() -> str:
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -95,6 +111,8 @@ def run_viewer(args) -> int:
         rig["vr"]["transport"] = args.vr
     if args.debug:
         rig["vr"]["debug"] = True
+    if (args.vr == "vuer") or args.tunnel or rig["vr"].get("transport") == "vuer":
+        _free_port(8012)                       # clear any stuck server from a prior run
     tunnel = None
     if args.tunnel:
         rig["vr"]["transport"] = "vuer"
