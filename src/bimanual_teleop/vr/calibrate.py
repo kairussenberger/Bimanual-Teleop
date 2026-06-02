@@ -70,3 +70,12 @@ class Calibrator:
         if len(s) < 5:
             return None
         return calibrate_R(np.mean(np.stack(s), axis=0), self.rig["arms"][side]["base_quat"])
+
+    def ref_frame(self, side: str) -> np.ndarray | None:
+        """Reference hand frame (continuous, no gravity flip) at the calibration
+        stance — the zero for wrist-rotation tracking. Columns [lateral, forward, normal]."""
+        from ..hands.quest_retarget import hand_frame
+        s = self._samples[side]
+        if len(s) < 5:
+            return None
+        return hand_frame(np.mean(np.stack(s), axis=0))[1]

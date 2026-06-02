@@ -45,9 +45,15 @@ class ArmIK:
         )
         self.posture = mink.PostureTask(self.model, cost=ik["posture_cost"])
         self.tasks = [self.ee_task, self.posture]
+        # Position IK uses j1-j3; the wrist joints j4-j6 are velocity-frozen here
+        # and set directly from the operator's wrist (so orientation never recruits
+        # the arm joints → no jerk).
+        wmv = float(ik.get("wrist_max_vel", 0.02))
+        vlim = {j: ik["max_vel"] for j in self.joints[:3]}
+        vlim.update({j: wmv for j in self.joints[3:]})
         self.limits = [
             mink.ConfigurationLimit(self.model),       # now reads the soft ranges
-            mink.VelocityLimit(self.model, {j: ik["max_vel"] for j in self.joints}),
+            mink.VelocityLimit(self.model, vlim),
         ]
         self.solver = ik.get("solver", "daqp")
         self.damping = float(ik.get("damping", 1e-3))
@@ -69,6 +75,12 @@ class ArmIK:
 
     def fk_ee(self) -> mink.SE3:
         return self.config.get_transform_frame_to_world(f"{self.side}_ee", "site")
+
+    def set_wrist(self, j456: np.ndarray) -> None:
+        """Set the wrist joints (j4,j5,j6) directly, clamped to their soft range."""
+        q = self.config.q.copy()
+        q[3:6] = np.clip(np.asarray(j456, dtype=float), self.soft_lo[3:6], self.soft_hi[3:6])
+        self.config.update(q)
 
     def solve(self, target: mink.SE3, iters: int = 1) -> np.ndarray:
         self.ee_task.set_target(target)

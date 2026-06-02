@@ -58,7 +58,8 @@ class TeleopEngine:
             for s in SIDES:
                 R = self.calibrator.compute(s)
                 if R is not None:
-                    self.arm[s].mapper.set_R(R)
+                    self.arm[s].mapper.set_R(R)                     # position frame
+                    self.arm[s].set_ref_frame(self.calibrator.ref_frame(s))  # wrist-rotation zero
                     applied.append(s)
             print(f"[calib] done (calibrated: {applied or 'none — using defaults'}). "
                   "Arms now follow your hands.", flush=True)

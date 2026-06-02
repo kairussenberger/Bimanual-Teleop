@@ -73,6 +73,16 @@ def euler_to_R(euler_xyz) -> np.ndarray:
     return Rx @ Ry @ Rz
 
 
+def rotvec(R: np.ndarray) -> np.ndarray:
+    """Rotation matrix → rotation vector (axis * angle)."""
+    R = np.asarray(R, dtype=float)
+    ang = np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))
+    if ang < 1e-7:
+        return np.zeros(3)
+    v = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+    return ang / (2.0 * np.sin(ang)) * v
+
+
 def mat_to_se3(T: np.ndarray) -> mink.SE3:
     T = np.asarray(T, dtype=float).reshape(4, 4)
     return mink.SE3.from_rotation_and_translation(

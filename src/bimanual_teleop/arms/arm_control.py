@@ -11,7 +11,8 @@ import numpy as np
 import mink
 
 from ..hands.retarget_core import OneEuroFilter
-from ..vr.frames import ClutchMapper, HandSample, mat_to_se3, quat_to_R, r_base_from_vr
+from ..hands.quest_retarget import hand_frame
+from ..vr.frames import ClutchMapper, HandSample, mat_to_se3, quat_to_R, r_base_from_vr, rotvec
 from .ik import ArmIK
 
 
@@ -41,7 +42,30 @@ class ArmController:
         # beta cuts lag on fast motion). Tune if jittery.
         self._filt_params = dict(mincutoff=4.0, beta=1.0)
         self.pos_filt = OneEuroFilter(**self._filt_params)
+        self.wrist_filt = OneEuroFilter(mincutoff=3.0, beta=0.6)
         self._was_engaged = False
+        # Direct wrist-joint mapping (j4 pitch, j5 yaw, j6 roll). ref_frame is the
+        # operator's hand frame at calibration; set via set_ref_frame().
+        self.ref_frame: np.ndarray | None = None
+        self.q0_wrist = np.asarray(rig["arms"][side]["neutral_q"][3:6], dtype=float)
+        self.wrist_gain = float(rig["mapping"].get("wrist_gain", 1.0))
+        self.wrist_signs = np.asarray(rig["mapping"].get("wrist_signs", {}).get(side, [1, 1, 1]), dtype=float)
+
+    def set_ref_frame(self, R: np.ndarray) -> None:
+        self.ref_frame = np.asarray(R, dtype=float).reshape(3, 3)
+
+    def _wrist_joints(self, hand: HandSample, t: float) -> np.ndarray:
+        """Map the operator's wrist rotation (vs calibration ref) directly to
+        (j4,j5,j6): pitch→j4, yaw→j5, roll→j6. Returns home wrist if uncalibrated."""
+        if self.ref_frame is None or hand is None or hand.landmarks is None:
+            return self.q0_wrist
+        cur = hand_frame(hand.landmarks)[1]                 # continuous hand frame (webxr)
+        rv = rotvec(cur @ self.ref_frame.T)                 # wrist rotation since calibration
+        x, y, z = self.ref_frame[:, 0], self.ref_frame[:, 1], self.ref_frame[:, 2]
+        pitch, yaw, roll = float(rv @ x), float(rv @ z), float(rv @ y)   # about lateral/normal/forward
+        tgt = self.q0_wrist + self.wrist_gain * self.wrist_signs * np.array([pitch, yaw, roll])
+        sm = self.wrist_filt({"j4": tgt[0], "j5": tgt[1], "j6": tgt[2]}, t)
+        return np.array([sm["j4"], sm["j5"], sm["j6"]])
 
     def update(self, hand: HandSample | None, engaged: bool, t: float) -> np.ndarray:
         active = bool(engaged and hand is not None and hand.tracked)
@@ -61,5 +85,9 @@ class ArmController:
             pw[1] = min(pw[1], self.y_bound) if self.side == "left" else max(pw[1], self.y_bound)
             pb = self.base_R.T @ (pw - self.base_pos)                    # anti-cross clamp, back to base
             target = mink.SE3.from_rotation_and_translation(target.rotation(), pb)
-            self.ik.solve(target, iters=self.iters)
+            self.ik.set_wrist(self.q0_wrist)               # solve POSITION with the wrist at neutral...
+            self.ik.solve(target, iters=self.iters)        # ...so the arm (j1-j3) never reacts to wrist motion
+            q = self.ik.q
+            q[3:6] = self._wrist_joints(hand, t)           # ...then overlay wrist orientation onto j4/j5/j6
+            return q
         return self.ik.q
