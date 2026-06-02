@@ -24,14 +24,18 @@ class ArmController:
         ws = rig["safety"]["workspace"]
         self.ws_min = np.asarray(ws["min"], dtype=float)
         self.ws_max = np.asarray(ws["max"], dtype=float)
-        self.pos_filt = OneEuroFilter()
+        self.iters = int(rig["ik"].get("iters", 1))
+        # lighter smoothing than the fingers -> less arm lag (snappier baseline,
+        # beta cuts lag on fast motion). Tune if jittery.
+        self._filt_params = dict(mincutoff=2.5, beta=0.6)
+        self.pos_filt = OneEuroFilter(**self._filt_params)
         self._was_engaged = False
 
     def update(self, hand: HandSample | None, engaged: bool, t: float) -> np.ndarray:
         active = bool(engaged and hand is not None and hand.tracked)
         if active and not self._was_engaged:                 # clutch rising edge
             self.mapper.engage(mat_to_se3(hand.wrist), self.ik.fk_ee())
-            self.pos_filt = OneEuroFilter()                  # reset smoothing on engage
+            self.pos_filt = OneEuroFilter(**self._filt_params)   # reset smoothing on engage
         if not active and self._was_engaged:                 # release
             self.mapper.release()
         self._was_engaged = active
@@ -43,5 +47,5 @@ class ArmController:
             import mink
             target = mink.SE3.from_rotation_and_translation(
                 target.rotation(), np.array([sm["x"], sm["y"], sm["z"]]))
-            self.ik.solve(target)
+            self.ik.solve(target, iters=self.iters)
         return self.ik.q

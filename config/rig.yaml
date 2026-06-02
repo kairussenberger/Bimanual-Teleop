@@ -46,10 +46,12 @@ control:
 
 ik:
   pos_cost: 1.0
-  ori_cost: 0.4      # weight orientation a bit lower than position for stability
-  posture_cost: 0.01 # pull toward neutral (singularity/limit help)
+  ori_cost: 0.0      # POSITION-ONLY: a 5-DoF arm + uncalibrated VR frame contorts/buckles
+                     # when chasing orientation. Re-enable (~0.2) after frame calibration.
+  posture_cost: 0.005 # gentle null-space regularization (damped-LS already avoids buckling)
   lm_damping: 1.0e-2 # damped least squares (singularity robustness)
-  max_vel: 2.0       # rad/s per joint velocity limit
+  max_vel: 8.0       # rad/s per joint — fast tracking (sim; tune down for real hardware)
+  iters: 5           # IK steps per control tick — snappier convergence, less lag
   solver: daqp
 
 mapping:
