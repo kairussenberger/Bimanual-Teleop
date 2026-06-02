@@ -124,16 +124,20 @@ def run_viewer(args) -> int:
         rig["vr"]["debug"] = True
     if (args.vr == "vuer") or args.tunnel or rig["vr"].get("transport") == "vuer":
         _free_port(8012)                       # clear any stuck server from a prior run
-    if args.tunnel:
+    if args.tunnel or args.http:
         rig["vr"]["transport"] = "vuer"
-        rig["vr"]["tunnel"] = True
+        rig["vr"]["tunnel"] = True   # serve plain HTTP; an https tunnel fronts it
     world = SimWorld(rig)
     engine = TeleopEngine(rig, world)
     supervisor = Supervisor(rig, AlwaysOn())
     src = make_source(rig)
     src.start()
     tunnel = None
-    if args.tunnel:
+    if args.http:
+        print("\n" + "=" * 64 + "\n  Serving HTTP on :8012. Open your BOOKMARKED cloudflared URL on\n"
+              "  the Quest (start it once with ./scripts/vr_tunnel.sh and keep it\n"
+              "  running — its URL stays fixed across sim restarts).\n" + "=" * 64 + "\n", flush=True)
+    elif args.tunnel:
         _wait_port(8012)            # server must be listening BEFORE cloudflared (else 502)
         tunnel = _start_tunnel()
     elif (args.vr == "vuer") or rig["vr"].get("transport") == "vuer":
@@ -158,7 +162,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--vr", choices=["fake", "vuer"], help="override vr.transport")
     ap.add_argument("--tunnel", action="store_true",
-                    help="serve over a public cloudflared HTTPS URL (works on isolated/campus Wi-Fi)")
+                    help="serve over a public cloudflared HTTPS URL (spawns a NEW random URL each run)")
+    ap.add_argument("--http", action="store_true",
+                    help="serve plain HTTP for a PERSISTENT external tunnel (stable bookmarked URL) — "
+                         "run ./scripts/vr_tunnel.sh once and keep it open")
     ap.add_argument("--debug", action="store_true", help="print incoming Vuer HAND_MOVE events")
     ap.add_argument("--gif", metavar="PATH", help="headless: render a GIF and exit")
     ap.add_argument("--seconds", type=float, default=6.0)
