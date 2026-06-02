@@ -50,19 +50,24 @@ class ActuatorRef:
 
 
 def parse_actuators(model: mujoco.MjModel) -> list[ActuatorRef]:
-    """Classify every actuator in the combined model by side/kind/target."""
+    """Classify every actuator in the combined model by side/kind/target.
+
+    Names: arm (unprefixed) = ``{side}_arm_j{n}_actuator``; hand (per-side prefix
+    ``lh_``/``rh_`` to namespace shared materials) = ``{p}h_{side}_{simshort}_actuator``
+    (e.g. ``lh_left_i-mcp_actuator``)."""
     refs: list[ActuatorRef] = []
     for i in range(model.nu):
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
-        if not name or name[1] != "_":
-            raise ValueError(f"unexpected actuator name (no l_/r_ prefix): {name!r}")
-        side = "left" if name[0] == "l" else "right"
-        rest = name[2:]
-        if rest.startswith("joint") and rest.endswith("_act"):
-            refs.append(ActuatorRef(i, name, "arm", side, rest[: -len("_act")]))
-            continue
-        core = rest.replace("left_", "").replace("right_", "").replace("_actuator", "")
-        refs.append(ActuatorRef(i, name, "hand", side, sim_short_to_orca(core)))
+        if name and (name.startswith("left_arm") or name.startswith("right_arm")):
+            side = "left" if name.startswith("left") else "right"
+            target = name[len(side) + 1:].removesuffix("_actuator")        # 'arm_j1'
+            refs.append(ActuatorRef(i, name, "arm", side, target))
+        elif name and (name.startswith("lh_") or name.startswith("rh_")):
+            side = "left" if name.startswith("lh_") else "right"
+            core = name[3:].removeprefix(f"{side}_").removesuffix("_actuator")  # 'wrist'/'i-mcp'
+            refs.append(ActuatorRef(i, name, "hand", side, sim_short_to_orca(core)))
+        else:
+            raise ValueError(f"unexpected actuator name: {name!r}")
     return refs
 
 

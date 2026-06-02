@@ -6,33 +6,34 @@
 # layout — dial `mount_euler` / `hand_euler` / `neutral_q` in the viewer to match
 # your real aluminium frame (tools/frame_check.py + sim/sim_world.py --pose).
 
-torso:
-  pos: [0.0, 0.0, 1.0]          # torso origin height off the floor (m)
-  half_width: 0.18              # box half-extent x (visual frame)
-  half_depth: 0.10              # box half-extent y
-  half_height: 0.22             # box half-extent z
+# The real rig: an AgileX Ranger 60x60 stand carrying two 5-DoF i2rt YAM arms
+# (the 6th DoF is replaced by the ORCA hand mount). Geometry is from a friend's
+# CAD: arm base poses ICP-registered (RMS ~1.3-1.6 mm), stand feet on the floor.
+stand:
+  pos: [0.0, 0.0, 0.2475]       # lifts the AgileX frame so its feet sit on z=0
 
 arms:
-  # Per side: where/how the YAM base mounts on the torso, the hand-on-flange
-  # transform, joint limits (rad, from yam.xml), and a comfortable neutral pose.
+  # 5-DoF YAM. base_pos/base_quat (quat = w x y z) place the arm base on the
+  # stand's Y-face plates; hand_pos/hand_euler are the measured flange→ORCA-hand
+  # transform; neutral_q is the home pose (j1=±90° → arms face forward, world −X).
   left:
     can_channel: can0                  # hardware (Linux): SocketCAN interface for this arm
-    mount_pos: [-0.20, 0.0, 0.18]      # shoulder position relative to torso origin
-    mount_euler: [1.5708, 0.0, 0.0]    # base tilt; arms clear the torso (TUNE to your frame)
-    hand_pos: [0.0, 0.0, 0.0]          # hand origin on link6 flange
-    hand_euler: [1.5708, 0.0, 0.0]     # align ORCA palm to the flange (TUNE)
-    neutral_q: [0.0, 0.9, 1.4, 0.0, 0.3, 0.0]   # rad, IK seed / rest pose, away from singularities
+    base_pos: [-0.0248, -0.1700, 0.6908]
+    base_quat: [0.49791, 0.50194, -0.50011, -0.50004]
+    hand_pos: [-0.0504, 0.1078, 0.0]   # flange (link5) → ORCA hand base
+    hand_euler: [0.0, 3.14159, 0.0]    # palm-down, thumb-inward at home
+    neutral_q: [1.5708, 0.0, 0.0, 0.0, 0.0]   # j1=+90° faces forward; j2..j5=0
   right:
     can_channel: can1
-    mount_pos: [0.20, 0.0, 0.18]
-    mount_euler: [1.5708, 0.0, 0.0]
-    hand_pos: [0.0, 0.0, 0.0]
-    hand_euler: [1.5708, 0.0, 0.0]
-    neutral_q: [0.0, 0.9, 1.4, 0.0, 0.3, 0.0]
-  # YAM joint limits (rad) — mirrored from yam.xml, used by IK limits + clamping.
+    base_pos: [0.0101, 0.0801, 0.6875]
+    base_quat: [0.49989, 0.49988, 0.50055, 0.49968]
+    hand_pos: [-0.0306, 0.1078, 0.0]
+    hand_euler: [0.0, 0.0, 0.0]
+    neutral_q: [4.7124, 0.0, 0.0, 0.0, 0.0]   # j1=270° (=−90° wrapped; range [0,2π])
+  # YAM joint limits (rad) from the URDF — used by IK velocity/config limits.
   joint_limits:
-    lower: [-2.61799, 0.0, 0.0, -1.5708, -1.5708, -2.0944]
-    upper: [3.05433, 3.65, 3.66519, 1.5708, 1.5708, 2.0944]
+    lower: [0.0, -2.879793, -1.396263, -1.570796, -1.570796]
+    upper: [6.283185, 0.436332, 2.443461, 1.570796, 1.570796]
 
 hands:
   left:  { model_name: orcahand_left }

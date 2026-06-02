@@ -1,8 +1,9 @@
 # bimanual-teleop
 
-VR teleoperation for a **torso humanoid**: two **i2rt YAM** 6-DoF arms with an
-**ORCA hand** on each, driven by **Meta Quest 3 / 3S** hand-tracking. Your arms
-move the robot's arms (Cartesian IK); your fingers move its fingers (retargeting).
+VR teleoperation for a **torso humanoid**: two **i2rt YAM** arms (5-DoF — the 6th
+joint is the **ORCA hand** mount) on an AgileX Ranger stand, driven by **Meta
+Quest 3 / 3S** hand-tracking. Your arms move the robot's arms (Cartesian IK); your
+fingers move its fingers (retargeting).
 
 **Sim-first**: the whole pipeline runs in MuJoCo on macOS with no robot and no
 headset. The same engine drives real hardware on a Linux host by swapping one
@@ -128,9 +129,9 @@ src/bimanual_teleop/
          joint_map.py        ORCA↔sim joint names, actuator parsing
          real_driver.py      real ORCA hand (orca_core)
   safety/ states.py clutch.py supervisor.py
-  sim/   model.py            mjSpec composition (torso + 2 YAM + 2 ORCA)
+  sim/   model.py            mjSpec composition (AgileX stand + 2 YAM + 2 ORCA); arm_xml() shared with IK
          sim_world.py        MjModel/MjData, apply commands, viewer/snapshots
-         models/yam/         vendored YAM MJCF + meshes (i2rt, MIT)
+         models/yam_real/    vendored 5-DoF YAM arms + AgileX stand (CAD-measured)
   launch/ run_sim.py run_hw.py
   tools/  frame_check.py
   bus/   topics.py zmq_io.py  latest-value PUB/SUB for the multi-process path
@@ -147,10 +148,23 @@ ZMQ latest-value bus, hardware driver seam.
 a small tweak — use `--debug`); tune mounts/frames to the real chassis; split the
 hardware path into per-arm ~250 Hz CAN processes over `bus/` for production rates.
 
+## The robot model (5-DoF, real geometry)
+
+The arms are **5-DoF** — the YAM's 6th joint (wrist roll) is replaced by the ORCA
+hand mount. The arm meshes, the **AgileX Ranger stand**, the per-arm base poses
+(ICP-registered to CAD, RMS ~1.3 mm), the flange→hand transforms, and the
+face-forward home pose all come from
+[kairussenberger/Orca-Yam-teleop](https://github.com/kairussenberger/Orca-Yam-teleop)
+and are vendored under `sim/models/yam_real/`. A 5-joint arm can't reach an
+arbitrary 6-DoF pose, so IK weights position above orientation (`ik.pos_cost >
+ik.ori_cost`) — the flange tracks position well, orientation best-effort (the
+fixed wrist roll lives in the hand mount). The one thing still to calibrate before
+hardware is `mapping.r_base_from_vr_euler` (run `tools/frame_check.py`).
+
 ## Provenance / licenses
 
-- YAM model under `sim/models/yam/` is vendored from
-  [i2rt-robotics/i2rt](https://github.com/i2rt-robotics/i2rt) (MIT), trimmed to the
-  meshes the MJCF uses, with an EE site + position actuators added (see header).
+- 5-DoF YAM arm model + AgileX stand under `sim/models/yam_real/`: from
+  [kairussenberger/Orca-Yam-teleop](https://github.com/kairussenberger/Orca-Yam-teleop)
+  (the real rig's MuJoCo setup), itself derived from the i2rt YAM URDF.
 - ORCA hand models are referenced from the sibling `orca_sim` package.
 - Retarget math + One-Euro filter ported from the sibling `orca-teleop`.

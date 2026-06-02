@@ -34,8 +34,11 @@ class YamArm:
         return np.asarray(self.robot.get_joint_pos(), dtype=float)[:6]
 
     def command(self, q) -> None:
-        """Command 6 joint targets (radians); MIT-mode PD/impedance at ~250 Hz."""
-        self.robot.command_joint_pos(np.asarray(q, dtype=float)[:6])
+        """Command joint targets (radians); MIT-mode PD/impedance at ~250 Hz.
+        The IK produces 5 joints (this rig's 6th DoF is the ORCA hand mount). If
+        your CAN chain still enumerates 6 motors, pad/anchor the 6th here to match
+        get_yam_robot's expected width — verify on the hardware (see README)."""
+        self.robot.command_joint_pos(np.asarray(q, dtype=float))
 
     def close(self) -> None:  # pragma: no cover - hardware only
         for fn in ("close", "disconnect", "stop"):

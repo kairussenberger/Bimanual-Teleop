@@ -55,8 +55,8 @@ class SimWorld:
         return T
 
     # --- rendering -------------------------------------------------------- #
-    def render_rgb(self, width: int = 1100, height: int = 800, azimuth: float = 90,
-                   elevation: float = -15, distance: float = 1.9, lookat=(0.0, 0.25, 1.25)):
+    def render_rgb(self, width: int = 1100, height: int = 800, azimuth: float = 120,
+                   elevation: float = -15, distance: float = 1.9, lookat=(-0.3, 0.0, 0.6)):
         if getattr(self, "_renderer", None) is None or self._rsize != (width, height):
             if getattr(self, "_renderer", None) is not None:
                 self._renderer.close()
@@ -81,10 +81,10 @@ def _demo_targets(t: float, rig: dict, hand_neutral: dict):
     c = 0.5 - 0.5 * math.cos(t * 1.2)
     arms, hands = {}, {}
     for side in SIDES:
-        q = list(rig["arms"][side]["neutral_q"])
-        q[0] += 0.4 * math.sin(t * 0.8) * (1 if side == "left" else -1)
-        q[3] += 0.5 * math.sin(t * 1.1)
-        q[5] += 0.6 * math.sin(t * 1.3)
+        q = list(rig["arms"][side]["neutral_q"])   # 5-DoF
+        q[1] += 0.4 * math.sin(t * 0.8)
+        q[2] += 0.4 * math.sin(t * 1.1)
+        q[3] += 0.5 * math.sin(t * 1.3)
         arms[side] = q
         d = dict(hand_neutral[side])
         for f in ("index", "middle", "ring", "pinky"):
