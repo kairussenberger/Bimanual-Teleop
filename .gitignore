@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.egg-info/
+# TLS certs for WebXR (per-machine, never commit)
+cert.pem
+key.pem
+*.local.yaml
+# Logs / recordings
+*.log
+recordings/

@@ -1,0 +1,85 @@
+"""VR pose types + the relative/clutch SE(3) mapping from a tracked wrist to an
+arm end-effector target.
+
+Mapping (per OpenTeleVision / Quest2ROS best practice): on clutch *engage* we
+latch the current wrist pose and the current EE pose as anchors. While engaged,
+the EE target is the anchored EE pose composed with the operator's wrist motion
+*relative* to its anchor — translation scaled and rotated into the arm base frame
+by a constant `R_base_from_vr`, orientation either absolute-aligned or relative.
+Because it's relative, absolute origin offsets cancel, so frame calibration only
+needs that one rotation (mirrored per arm about the sagittal plane).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import mink
+import numpy as np
+
+
+@dataclass
+class HandSample:
+    tracked: bool = False
+    wrist: np.ndarray = field(default_factory=lambda: np.eye(4))  # 4x4 in headset/world frame
+    landmarks: np.ndarray | None = None                          # (25,3) WebXR joints
+    pinch: float = 0.0                                           # 0..1 pinch strength
+
+
+@dataclass
+class VRFrame:
+    stamp: float = 0.0
+    head: np.ndarray = field(default_factory=lambda: np.eye(4))
+    hands: dict[str, HandSample] = field(default_factory=dict)
+
+
+def euler_to_R(euler_xyz) -> np.ndarray:
+    """Intrinsic XYZ euler (rad) → 3x3 rotation (matches MuJoCo eulerseq XYZ)."""
+    cx, cy, cz = np.cos(euler_xyz)
+    sx, sy, sz = np.sin(euler_xyz)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    return Rx @ Ry @ Rz
+
+
+def mat_to_se3(T: np.ndarray) -> mink.SE3:
+    T = np.asarray(T, dtype=float).reshape(4, 4)
+    return mink.SE3.from_rotation_and_translation(
+        mink.SO3.from_matrix(T[:3, :3]), T[:3, 3])
+
+
+class ClutchMapper:
+    """Relative+clutch wrist→EE mapping for one arm."""
+
+    def __init__(self, R_base_from_vr: np.ndarray, pos_scale: float = 1.0,
+                 abs_orientation: bool = True):
+        self.R = np.asarray(R_base_from_vr, dtype=float).reshape(3, 3)
+        self.scale = float(pos_scale)
+        self.abs_orientation = bool(abs_orientation)
+        self.anchor_ctrl: mink.SE3 | None = None
+        self.anchor_ee: mink.SE3 | None = None
+
+    @property
+    def engaged(self) -> bool:
+        return self.anchor_ctrl is not None
+
+    def engage(self, ctrl: mink.SE3, ee: mink.SE3) -> None:
+        """Latch anchors on the clutch rising edge."""
+        self.anchor_ctrl = ctrl
+        self.anchor_ee = ee
+
+    def release(self) -> None:
+        self.anchor_ctrl = None
+        self.anchor_ee = None
+
+    def target(self, ctrl: mink.SE3) -> mink.SE3:
+        """EE target (arm base frame) for the current wrist pose while engaged."""
+        assert self.anchor_ctrl is not None and self.anchor_ee is not None
+        dp_vr = ctrl.translation() - self.anchor_ctrl.translation()
+        p = self.anchor_ee.translation() + self.scale * (self.R @ dp_vr)
+        if self.abs_orientation:
+            Rt = self.R @ ctrl.rotation().as_matrix()
+        else:
+            dR = self.anchor_ctrl.rotation().inverse().as_matrix() @ ctrl.rotation().as_matrix()
+            Rt = self.anchor_ee.rotation().as_matrix() @ (self.R @ dR @ self.R.T)
+        return mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(Rt), p)

@@ -1,0 +1,38 @@
+[project]
+name = "bimanual-teleop"
+version = "0.1.0"
+description = "VR (Quest 3) teleoperation for a bimanual torso humanoid: two i2rt YAM arms + two ORCA hands. Sim-first (MuJoCo), hardware-ready behind one driver interface."
+requires-python = ">=3.12"
+dependencies = [
+    "mujoco>=3.2",          # mjSpec model composition + sim; ships mjpython on macOS
+    "mink>=0.0.4",          # MuJoCo differential-IK (per-arm Cartesian teleop)
+    "numpy>=2.1",
+    "pyzmq>=26",            # multi-process bus (PUB/SUB, latest-value via CONFLATE)
+    "msgpack>=1.0",         # compact message encoding on the bus
+    "loop-rate-limiters>=0.1",  # fixed-rate control loops
+    "pyyaml>=6",
+    "orca-core",            # real ORCA hand driver + 17-joint config (degrees); editable sibling
+    "orca-sim",             # vendored-in-place ORCA MuJoCo hand models (referenced via package path)
+    "imageio>=2.37.3",
+]
+
+[project.optional-dependencies]
+# VR ingest (Quest 3 over WebXR). Heavier/churny dep, isolated so the core sim stays lean.
+vr = ["vuer>=0.0.32"]
+# Real YAM arms are Linux-only (SocketCAN). Install the i2rt SDK manually on the Linux host:
+#   git clone https://github.com/i2rt-robotics/i2rt && uv pip install -e i2rt   (Ubuntu, Python 3.11)
+# hardware = ["i2rt"]   # not on PyPI; see README "Hardware day".
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+orca-core = { path = "../orca_core", editable = true }
+orca-sim = { path = "../orca_sim", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bimanual_teleop"]

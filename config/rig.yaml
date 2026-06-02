@@ -1,0 +1,81 @@
+# Physical + control configuration for the bimanual humanoid teleop rig.
+#
+# COORDINATE FRAME (sim/world): +x right, +y forward, +z up. The torso sits at
+# `torso.pos`; each arm's YAM base is mounted at a shoulder frame relative to the
+# torso. Hand mount + arm-base orientations are PLACEHOLDERS tuned for a plausible
+# layout — dial `mount_euler` / `hand_euler` / `neutral_q` in the viewer to match
+# your real aluminium frame (tools/frame_check.py + sim/sim_world.py --pose).
+
+torso:
+  pos: [0.0, 0.0, 1.0]          # torso origin height off the floor (m)
+  half_width: 0.18              # box half-extent x (visual frame)
+  half_depth: 0.10              # box half-extent y
+  half_height: 0.22             # box half-extent z
+
+arms:
+  # Per side: where/how the YAM base mounts on the torso, the hand-on-flange
+  # transform, joint limits (rad, from yam.xml), and a comfortable neutral pose.
+  left:
+    can_channel: can0                  # hardware (Linux): SocketCAN interface for this arm
+    mount_pos: [-0.20, 0.0, 0.18]      # shoulder position relative to torso origin
+    mount_euler: [1.5708, 0.0, 0.0]    # base tilt; arms clear the torso (TUNE to your frame)
+    hand_pos: [0.0, 0.0, 0.0]          # hand origin on link6 flange
+    hand_euler: [1.5708, 0.0, 0.0]     # align ORCA palm to the flange (TUNE)
+    neutral_q: [0.0, 0.9, 1.4, 0.0, 0.3, 0.0]   # rad, IK seed / rest pose, away from singularities
+  right:
+    can_channel: can1
+    mount_pos: [0.20, 0.0, 0.18]
+    mount_euler: [1.5708, 0.0, 0.0]
+    hand_pos: [0.0, 0.0, 0.0]
+    hand_euler: [1.5708, 0.0, 0.0]
+    neutral_q: [0.0, 0.9, 1.4, 0.0, 0.3, 0.0]
+  # YAM joint limits (rad) — mirrored from yam.xml, used by IK limits + clamping.
+  joint_limits:
+    lower: [-2.61799, 0.0, 0.0, -1.5708, -1.5708, -2.0944]
+    upper: [3.05433, 3.65, 3.66519, 1.5708, 1.5708, 2.0944]
+
+hands:
+  left:  { model_name: orcahand_left }
+  right: { model_name: orcahand_right }
+
+control:
+  arm_hz: 120        # sim IK/control rate (real YAM CAN loop target: 200-250 on Linux)
+  hand_hz: 60        # finger retarget rate
+  vr_hz: 72          # expected Quest stream rate
+
+ik:
+  pos_cost: 1.0
+  ori_cost: 0.4      # weight orientation a bit lower than position for stability
+  posture_cost: 0.01 # pull toward neutral (singularity/limit help)
+  lm_damping: 1.0e-2 # damped least squares (singularity robustness)
+  max_vel: 2.0       # rad/s per joint velocity limit
+  solver: daqp
+
+mapping:
+  # Relative + clutch SE(3): on engage, anchor current controller & EE poses;
+  # while engaged, EE target = anchor_ee ∘ scaled(relative controller motion).
+  pos_scale: 1.0
+  abs_orientation: true   # align EE orientation to absolute wrist orientation (OpenTeleVision style)
+  # R_base_from_vr: rotation (euler xyz, rad) mapping headset/world axes -> arm base axes.
+  # Mirrored about the sagittal plane for the two arms. TUNE with frame_check.
+  r_base_from_vr_euler:
+    left:  [0.0, 0.0, 0.0]
+    right: [0.0, 0.0, 0.0]
+  # Per-side abduction sign for finger spread (flip if fingers splay the wrong way).
+  abd_mirror:
+    left: false
+    right: true
+
+safety:
+  staleness_s: 0.15   # VR sample older than this -> not fresh (hold/ramp)
+  ramp_s: 0.7         # soft-start ramp from neutral on (re)engage
+  hold_s: 0.3         # on VR loss while engaged: hold last, then ramp to neutral
+  workspace:          # axis-aligned EE target bounds in arm base frame (m)
+    min: [-0.6, -0.2, -0.6]
+    max: [0.6, 0.7, 0.6]
+
+vr:
+  transport: fake     # 'fake' (synthetic, no headset) or 'vuer' (real Quest WebXR)
+  cert_file: cert.pem
+  key_file: key.pem
+  ngrok: false        # true to tunnel for the Quest browser
