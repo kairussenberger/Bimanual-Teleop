@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import numpy as np
 
+import mink
+
 from ..hands.retarget_core import OneEuroFilter
-from ..vr.frames import ClutchMapper, HandSample, mat_to_se3, r_base_from_vr
+from ..vr.frames import ClutchMapper, HandSample, mat_to_se3, quat_to_R, r_base_from_vr
 from .ik import ArmIK
 
 
@@ -20,9 +22,16 @@ class ArmController:
         self.ik = ArmIK(rig, side)
         m = rig["mapping"]
         # Frame derived from THIS arm's real base orientation so "hand forward" →
-        # "robot reaches forward" (not sideways). tweak = optional per-side nudge.
+        # "robot reaches forward" (not sideways). Calibration overrides this via
+        # mapper.set_R(). tweak = optional per-side nudge.
         R = r_base_from_vr(rig["arms"][side]["base_quat"], m["r_base_from_vr_euler"][side])
         self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"], abs_orientation=False)
+        # Anti-cross guard: keep this hand on its own side of the world Y axis so
+        # the two arms can never overlap. left stays y ≤ -gap, right stays y ≥ +gap.
+        self.base_R = quat_to_R(rig["arms"][side]["base_quat"])   # base → world
+        self.base_pos = np.asarray(rig["arms"][side]["base_pos"], dtype=float)
+        gap = float(rig.get("vr", {}).get("cross_gap", 0.05))
+        self.y_bound = -gap if side == "left" else gap
         ws = rig["safety"]["workspace"]
         self.ws_min = np.asarray(ws["min"], dtype=float)
         self.ws_max = np.asarray(ws["max"], dtype=float)
@@ -46,8 +55,10 @@ class ArmController:
             target = self.mapper.target(mat_to_se3(hand.wrist))
             p = np.clip(target.translation(), self.ws_min, self.ws_max)  # workspace box
             sm = self.pos_filt({"x": p[0], "y": p[1], "z": p[2]}, t)     # One-Euro
-            import mink
-            target = mink.SE3.from_rotation_and_translation(
-                target.rotation(), np.array([sm["x"], sm["y"], sm["z"]]))
+            pb = np.array([sm["x"], sm["y"], sm["z"]])                   # target in base frame
+            pw = self.base_R @ pb + self.base_pos                        # → world
+            pw[1] = min(pw[1], self.y_bound) if self.side == "left" else max(pw[1], self.y_bound)
+            pb = self.base_R.T @ (pw - self.base_pos)                    # anti-cross clamp, back to base
+            target = mink.SE3.from_rotation_and_translation(target.rotation(), pb)
             self.ik.solve(target, iters=self.iters)
         return self.ik.q

@@ -129,6 +129,39 @@ def test_abs_orientation_no_engage_snap():
     assert np.allclose(tgt.translation(), ee.translation(), atol=1e-9)
 
 
+def test_calibration_aligns_forward_and_no_cross():
+    """Reference-stance calibration → 'hand forward' maps to robot forward (−X),
+    and the anti-cross clamp keeps each hand on its own side of center."""
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.arms.arm_control import ArmController
+    from bimanual_teleop.vr.calibrate import calibrate_R
+    from bimanual_teleop.vr.frames import HandSample, quat_to_R
+    lm = np.zeros((25, 3))                              # fingers forward (−z), palm down
+    lm[6] = [0.03, 0, -0.03]; lm[21] = [-0.03, 0, -0.03]
+    lm[9] = [0.03, 0, -0.15]; lm[14] = [0, 0, -0.16]; lm[19] = [-0.01, 0, -0.15]
+    wm = lambda p: np.block([[np.eye(3), np.array(p).reshape(3, 1)], [0, 0, 0, 1]])
+    rig = load_rig()
+    for side, sign in (("left", -1), ("right", +1)):
+        ac = ArmController(rig, side)
+        ac.mapper.set_R(calibrate_R(lm, rig["arms"][side]["base_quat"]))
+        bR = quat_to_R(rig["arms"][side]["base_quat"]); bp = np.array(rig["arms"][side]["base_pos"])
+        ac.ik.reset(); t = 0.0
+        ac.update(HandSample(tracked=True, wrist=wm([0, 0, 0]), landmarks=lm), True, t)
+        x0 = (bR @ ac.ik.fk_ee().translation() + bp)[0]
+        for _ in range(45):
+            t += 1 / 120
+            ac.update(HandSample(tracked=True, wrist=wm([0, 0, -0.25]), landmarks=lm), True, t)
+        assert (bR @ ac.ik.fk_ee().translation() + bp)[0] < x0 - 0.02      # forward = −X
+        # shove toward center; must stay on own side
+        ac.ik.reset(); t = 0.0
+        ac.update(HandSample(tracked=True, wrist=wm([0, 0, 0]), landmarks=lm), True, t)
+        for _ in range(80):
+            t += 1 / 120
+            ac.update(HandSample(tracked=True, wrist=wm([-sign * 0.5, 0, 0]), landmarks=lm), True, t)
+        y = (bR @ ac.ik.fk_ee().translation() + bp)[1]
+        assert (y <= 0.001) if side == "left" else (y >= -0.001)
+
+
 def test_end_to_end_sim_tick():
     """Fake VR → engine → sim moves the arms (EE position changes)."""
     from bimanual_teleop.config import load_rig, SIDES
@@ -136,6 +169,7 @@ def test_end_to_end_sim_tick():
     from bimanual_teleop.sim.sim_world import SimWorld
     from bimanual_teleop.vr.ingest import FakeVRSource
     rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0          # skip the calibration phase for this motion test
     world = SimWorld(rig)
     engine = TeleopEngine(rig, world)
     src = FakeVRSource()

@@ -91,6 +91,11 @@ class ClutchMapper:
         self.anchor_ee: mink.SE3 | None = None
         self._R_off: np.ndarray | None = None   # orientation anchor so engage is continuous
 
+    def set_R(self, R: np.ndarray) -> None:
+        """Replace the headset→base rotation (e.g. after calibration)."""
+        self.R = np.asarray(R, dtype=float).reshape(3, 3)
+        self.release()   # force a fresh anchor on next engage
+
     @property
     def engaged(self) -> bool:
         return self.anchor_ctrl is not None

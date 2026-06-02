@@ -22,14 +22,14 @@ arms:
     base_quat: [0.49791, 0.50194, -0.50011, -0.50004]
     hand_pos: [-0.0504, 0.1078, 0.0]   # flange (link5) → ORCA hand base
     hand_euler: [0.0, 3.14159, 0.0]    # palm-down, thumb-inward at home
-    neutral_q: [1.5708, -0.3, 1.63, 0.0, 0.0]   # j1=+90° forward, elbow bent → room to move in all directions
+    neutral_q: [1.671, -1.0, 1.825, 0.0, 0.0]   # forward + own (-Y) side, elbow bent, well clear of the other arm
   right:
     can_channel: can1
     base_pos: [0.0101, 0.0801, 0.6875]
     base_quat: [0.49989, 0.49988, 0.50055, 0.49968]
     hand_pos: [-0.0306, 0.1078, 0.0]
     hand_euler: [0.0, 0.0, 0.0]
-    neutral_q: [4.7124, -0.3, 1.63, 0.0, 0.0]   # j1=270° forward, elbow bent (mirror of left)
+    neutral_q: [4.612, -1.0, 1.65, 0.0, 0.0]   # forward + own (+Y) side, elbow bent, well clear of the other arm
   # YAM joint limits (rad) from the URDF — used by IK velocity/config limits.
   joint_limits:
     lower: [0.0, -2.879793, -1.396263, -1.570796, -1.570796]
@@ -82,6 +82,8 @@ safety:
 
 vr:
   transport: fake     # 'fake' (synthetic, no headset) or 'vuer' (real Quest WebXR)
+  calib_seconds: 5.0  # on connect: hold hands out front, palms down, spread — measures your frame
+  cross_gap: 0.05     # min world-Y gap each hand keeps from center (anti-overlap guard, metres)
   cert_file: cert.pem
   key_file: key.pem
   ngrok: false        # true to tunnel for the Quest browser
