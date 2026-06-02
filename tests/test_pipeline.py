@@ -95,6 +95,40 @@ def test_zmq_loopback_latest_value():
     pub.close(); sub.close()
 
 
+def test_clutch_release_disengages_immediately():
+    """Releasing the deadman on a LIVE feed must stop following at once (the HOLD
+    window is only for tracking dropouts) — the deadman bug the review caught."""
+    from bimanual_teleop.config import load_rig, SIDES
+    from bimanual_teleop.safety.supervisor import Supervisor
+    from bimanual_teleop.safety.clutch import KeyboardClutch
+    from bimanual_teleop.vr.frames import VRFrame, HandSample
+    rig = load_rig()
+    kc = KeyboardClutch()
+    sup = Supervisor(rig, kc)
+    fr = VRFrame(stamp=100.0, hands={s: HandSample(tracked=True) for s in SIDES})
+    kc.held = True
+    assert sup.update(fr, 100.0)["left"]
+    kc.held = False
+    fr2 = VRFrame(stamp=100.05, hands={s: HandSample(tracked=True) for s in SIDES})
+    assert not sup.update(fr2, 100.05)["left"]   # immediate, NOT after hold_s
+
+
+def test_abs_orientation_no_engage_snap():
+    """abs-orientation mode must equal the anchored EE pose at the engage instant
+    (the ~157° wrist snap the review caught)."""
+    import mink
+    from bimanual_teleop.vr.frames import ClutchMapper, euler_to_R
+    R_ee = euler_to_R([0.5, -0.3, 0.8])
+    R_ctrl = euler_to_R([1.1, 0.2, -0.4])
+    ee = mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(R_ee), np.array([0.3, 0.1, 0.5]))
+    ctrl = mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(R_ctrl), np.array([1.0, 2.0, 3.0]))
+    m = ClutchMapper(euler_to_R([0.2, 0.0, 1.5]), pos_scale=1.0, abs_orientation=True)
+    m.engage(ctrl, ee)
+    tgt = m.target(ctrl)
+    assert np.allclose(tgt.rotation().as_matrix(), R_ee, atol=1e-9)
+    assert np.allclose(tgt.translation(), ee.translation(), atol=1e-9)
+
+
 def test_end_to_end_sim_tick():
     """Fake VR → engine → sim moves the arms (EE position changes)."""
     from bimanual_teleop.config import load_rig, SIDES

@@ -58,19 +58,24 @@ class ClutchMapper:
         self.abs_orientation = bool(abs_orientation)
         self.anchor_ctrl: mink.SE3 | None = None
         self.anchor_ee: mink.SE3 | None = None
+        self._R_off: np.ndarray | None = None   # orientation anchor so engage is continuous
 
     @property
     def engaged(self) -> bool:
         return self.anchor_ctrl is not None
 
     def engage(self, ctrl: mink.SE3, ee: mink.SE3) -> None:
-        """Latch anchors on the clutch rising edge."""
+        """Latch position AND orientation anchors on the clutch rising edge, so the
+        target equals the current EE pose at the engage instant (no jump)."""
         self.anchor_ctrl = ctrl
         self.anchor_ee = ee
+        # abs mode: Rt = R_off @ (R @ ctrl.R); choose R_off so Rt == anchor_ee.R at engage.
+        self._R_off = ee.rotation().as_matrix() @ (self.R @ ctrl.rotation().as_matrix()).T
 
     def release(self) -> None:
         self.anchor_ctrl = None
         self.anchor_ee = None
+        self._R_off = None
 
     def target(self, ctrl: mink.SE3) -> mink.SE3:
         """EE target (arm base frame) for the current wrist pose while engaged."""
@@ -78,7 +83,7 @@ class ClutchMapper:
         dp_vr = ctrl.translation() - self.anchor_ctrl.translation()
         p = self.anchor_ee.translation() + self.scale * (self.R @ dp_vr)
         if self.abs_orientation:
-            Rt = self.R @ ctrl.rotation().as_matrix()
+            Rt = self._R_off @ (self.R @ ctrl.rotation().as_matrix())   # absolute-aligned, no engage snap
         else:
             dR = self.anchor_ctrl.rotation().inverse().as_matrix() @ ctrl.rotation().as_matrix()
             Rt = self.anchor_ee.rotation().as_matrix() @ (self.R @ dR @ self.R.T)

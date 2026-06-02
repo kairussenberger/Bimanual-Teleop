@@ -26,18 +26,30 @@ class AlwaysOn(Clutch):
 
 
 class GestureClutch(Clutch):
-    """Engage `side` while that hand's pinch is RELEASED (open) — i.e. fingers
-    extended. Pinching then commands a grasp without disengaging the arm. This is
-    a placeholder convention; swap for a dedicated engage gesture or a pedal."""
+    """Held-intent deadman from a DEDICATED engage gesture that does NOT collide
+    with grasping: a sustained thumb-tip↔pinky-tip pinch (the thumb–index pinch
+    stays free to command a grasp). Engage `side` while that hand holds the
+    gesture. Tune `engage_below` (normalized tip distance) or replace with a
+    bluetooth foot pedal implementing this same interface.
 
-    def __init__(self, release_below: float = 0.3):
-        self.release_below = release_below
+    This is a real safety gate — releasing the gesture disengages immediately
+    (the supervisor only HOLDs across tracking *dropouts*, not deliberate release).
+    """
+
+    def __init__(self, engage_below: float = 0.35):
+        self.engage_below = float(engage_below)
 
     def engaged(self, side: str, frame: VRFrame | None) -> bool:
         if frame is None or side not in frame.hands:
             return False
         h = frame.hands[side]
-        return h.tracked  # always track; refine with a dedicated engage gesture
+        if not h.tracked or h.landmarks is None or len(h.landmarks) < 25:
+            return False
+        import numpy as np
+        lm = h.landmarks
+        d = np.linalg.norm(lm[4] - lm[24])             # thumb tip ↔ pinky tip
+        scale = np.linalg.norm(lm[11] - lm[0]) + 1e-6  # wrist → middle proximal
+        return bool(d / scale < self.engage_below)
 
 
 class KeyboardClutch(Clutch):

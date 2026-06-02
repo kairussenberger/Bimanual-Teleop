@@ -68,6 +68,7 @@ class SimInfo:
 
 def build_model(rig: dict) -> SimInfo:
     spec = mujoco.MjSpec()
+    spec.compiler.degree = False               # rig euler values are RADIANS (matches yam/orca XMLs)
     spec.option.gravity = [0.0, 0.0, 0.0]      # teleop preview: clean IK tracking, no sag
     spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
     spec.visual.global_.offwidth = 1280        # offscreen framebuffer (tools/snapshots)

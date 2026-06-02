@@ -17,6 +17,7 @@ defensive; verify against your version with --debug.
 """
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 
@@ -34,6 +35,15 @@ def _mat4(flat) -> np.ndarray:
     return a.reshape(4, 4, order="F")   # WebXR/Vuer matrices are column-major
 
 
+def _pinch_from_landmarks(lm) -> float:
+    """Thumb-tip↔index-tip distance normalized by hand size → 1 pinched, 0 open."""
+    if lm is None or len(lm) < 25:
+        return 0.0
+    d = np.linalg.norm(lm[4] - lm[9])            # thumb tip (4) ↔ index tip (9)
+    scale = np.linalg.norm(lm[11] - lm[0]) + 1e-6  # wrist → middle proximal
+    return float(np.clip((0.6 - d / scale) / (0.6 - 0.2), 0.0, 1.0))
+
+
 class VuerVRSource(VRSource):
     def __init__(self, rig: dict, debug: bool = False):
         v = rig.get("vr", {})
@@ -47,8 +57,10 @@ class VuerVRSource(VRSource):
         self._app = None
 
     def latest(self) -> VRFrame | None:
+        # Return an atomic snapshot so a control tick can't read a half-updated
+        # frame (left hand from sample N, right from N+1) while the handler writes.
         with self._lock:
-            return self._frame
+            return dataclasses.replace(self._frame, hands=dict(self._frame.hands))
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._serve, daemon=True)
@@ -60,16 +72,23 @@ class VuerVRSource(VRSource):
         pass
 
     def _update_hand(self, side: str, wrist_flat, landmarks_flat) -> None:
+        # tracked ONLY when real wrist data arrived — WebXR keeps firing HAND_MOVE
+        # with one hand absent; don't fabricate a tracked hand at the origin.
+        if wrist_flat is None:
+            with self._lock:
+                self._frame = dataclasses.replace(
+                    self._frame, stamp=time.monotonic(),
+                    hands={**self._frame.hands, side: HandSample(tracked=False)})
+            return
         lm = None
         if landmarks_flat is not None and len(landmarks_flat) >= 75:
             lm = np.asarray(landmarks_flat, dtype=float)[:75].reshape(25, 3)
         with self._lock:
-            self._frame.stamp = time.time()
-            self._frame.hands[side] = HandSample(
-                tracked=True,
-                wrist=_mat4(wrist_flat) if wrist_flat is not None else np.eye(4),
-                landmarks=lm,
-            )
+            self._frame = dataclasses.replace(
+                self._frame, stamp=time.monotonic(),
+                hands={**self._frame.hands, side: HandSample(
+                    tracked=True, wrist=_mat4(wrist_flat), landmarks=lm,
+                    pinch=_pinch_from_landmarks(lm))})
 
     def _serve(self) -> None:  # pragma: no cover - needs vuer + a headset
         from vuer import Vuer
@@ -94,7 +113,7 @@ class VuerVRSource(VRSource):
             cam = (event.value or {}).get("camera", {})
             if cam.get("matrix") is not None:
                 with self._lock:
-                    self._frame.head = _mat4(cam["matrix"])
+                    self._frame = dataclasses.replace(self._frame, head=_mat4(cam["matrix"]))
 
         @app.spawn(start=True)
         async def main(session, fps=72):

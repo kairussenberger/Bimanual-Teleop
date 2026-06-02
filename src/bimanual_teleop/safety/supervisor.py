@@ -37,6 +37,9 @@ class Supervisor:
     def reset(self) -> None:
         self._estop = False
         self.state = State.IDLE
+        # Require a fresh, deliberate re-engage after an e-stop — don't auto-resume.
+        self._last_fresh_t = {side: -1e9 for side in SIDES}
+        self._engaged_since = {side: None for side in SIDES}
 
     def update(self, frame: VRFrame | None, t: float) -> dict[str, bool]:
         """Return {side: engaged}. Updates self.state for display/telemetry."""
@@ -56,19 +59,21 @@ class Supervisor:
 
             if want and fresh_frame and tracked:
                 eng = True
-            elif self._engaged_since[side] is not None and stale_for <= self.hold_s:
-                eng = True   # brief HOLD across a tracking dropout (don't snap)
+            elif (self._engaged_since[side] is not None
+                  and not (fresh_frame and tracked)        # HOLD is ONLY for dropouts...
+                  and stale_for <= self.hold_s):           # ...for a brief window
+                eng = True
             else:
-                eng = False
+                eng = False                                 # incl. deliberate release on a live feed
 
             self._engaged_since[side] = (self._engaged_since[side] or t) if eng else None
             engaged[side] = eng
             any_engaged = any_engaged or eng
 
-        if frame is None:
-            self.state = State.DISCONNECTED
-        elif any_engaged:
+        if any_engaged:
             self.state = State.ENGAGED
-        else:
+        elif fresh_frame:
             self.state = State.IDLE
+        else:
+            self.state = State.DISCONNECTED   # None frame, or stale/never-connected stream
         return engaged

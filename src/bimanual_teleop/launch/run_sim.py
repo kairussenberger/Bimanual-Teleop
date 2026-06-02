@@ -56,11 +56,10 @@ def run_viewer(args) -> int:
     supervisor = Supervisor(rig, AlwaysOn())
     src = make_source(rig)
     src.start()
-    t0 = time.time()
     try:
         with mujoco.viewer.launch_passive(world.model, world.data) as v:
             while v.is_running():
-                t = time.time() - t0
+                t = time.monotonic()   # one clock shared with the source stamps + supervisor
                 frame = src.latest()
                 engine.tick(frame, supervisor.update(frame, t), t)
                 world.step(2)

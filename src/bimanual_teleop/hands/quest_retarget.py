@@ -79,13 +79,13 @@ def synthetic_webxr_hand(curl: float, *, thumb_curl: float | None = None) -> np.
             p = p + _SEG * d
             w[start_idx + k] = p
 
-    # thumb: 4 joints, offset to +x, curls toward palm
+    # thumb: 4 joints, offset to +x, curls toward palm (y-step folds with `ang`)
     tp = np.array([0.03, 0.01, 0.0])
     w[1] = tp
     ang = 0.0
     for k in range(1, 4):
         ang += tc * 1.1
-        tp = tp + _SEG * np.array([np.cos(ang) * 0.3, np.sin(0.6), -np.sin(ang)])
+        tp = tp + _SEG * np.array([np.cos(ang) * 0.3, np.cos(ang), -np.sin(ang)])
         w[1 + k] = tp
     # four fingers: 5 joints each (metacarpal + 4)
     for name, base in (("index", 5), ("middle", 10), ("ring", 15), ("pinky", 20)):

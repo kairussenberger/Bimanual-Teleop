@@ -47,7 +47,9 @@ class FakeVRSource(VRSource):
         self._run = False
         self._thread: threading.Thread | None = None
 
-    def frame_at(self, t: float) -> VRFrame:
+    def frame_at(self, t: float, stamp: float | None = None) -> VRFrame:
+        """`t` drives the synthetic motion; `stamp` is the freshness clock the
+        supervisor reads (defaults to `t` for deterministic headless runs)."""
         hands = {}
         for side in SIDES:
             s = 1.0 if side == "left" else -1.0
@@ -62,24 +64,25 @@ class FakeVRSource(VRSource):
                 landmarks=synthetic_webxr_hand(curl),
                 pinch=curl,
             )
-        return VRFrame(stamp=t, head=np.eye(4), hands=hands)
+        return VRFrame(stamp=(t if stamp is None else stamp), head=np.eye(4), hands=hands)
 
     def latest(self) -> VRFrame | None:
         if self._thread is None:                 # synchronous mode: compute on demand
-            return self.frame_at(time.time() - self._t0 if self._t0 else 0.0)
+            now = time.monotonic()
+            return self.frame_at(now - self._t0 if self._t0 else 0.0, stamp=now)
         with self._lock:
             return self._frame
 
     def start(self) -> None:
-        if self._t0 == 0.0:
-            self._t0 = time.time()
+        self._t0 = time.monotonic()
         self._run = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _loop(self) -> None:
         while self._run:
-            f = self.frame_at(time.time() - self._t0)
+            now = time.monotonic()
+            f = self.frame_at(now - self._t0, stamp=now)   # stamp on the supervisor's clock
             with self._lock:
                 self._frame = f
             time.sleep(1.0 / self.rate)

@@ -46,13 +46,12 @@ def main() -> int:
     src.start()
 
     period = 1.0 / hz
-    t0 = time.time()
     try:
         while True:
-            t = time.time() - t0
+            t = time.monotonic()   # shared clock with source stamps + supervisor staleness
             frame = src.latest()
             engine.tick(frame, supervisor.update(frame, t), t)
-            dt = period - ((time.time() - t0) - t)
+            dt = period - (time.monotonic() - t)
             if dt > 0:
                 time.sleep(dt)
     except KeyboardInterrupt:
