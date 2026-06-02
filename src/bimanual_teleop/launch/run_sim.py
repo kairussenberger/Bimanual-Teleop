@@ -93,6 +93,8 @@ def run_viewer(args) -> int:
     rig = load_rig()
     if args.vr:
         rig["vr"]["transport"] = args.vr
+    if args.debug:
+        rig["vr"]["debug"] = True
     tunnel = None
     if args.tunnel:
         rig["vr"]["transport"] = "vuer"
@@ -126,6 +128,7 @@ def main() -> int:
     ap.add_argument("--vr", choices=["fake", "vuer"], help="override vr.transport")
     ap.add_argument("--tunnel", action="store_true",
                     help="serve over a public cloudflared HTTPS URL (works on isolated/campus Wi-Fi)")
+    ap.add_argument("--debug", action="store_true", help="print incoming Vuer HAND_MOVE events")
     ap.add_argument("--gif", metavar="PATH", help="headless: render a GIF and exit")
     ap.add_argument("--seconds", type=float, default=6.0)
     ap.add_argument("--fps", type=float, default=60.0)

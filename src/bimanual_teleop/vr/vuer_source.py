@@ -53,7 +53,7 @@ class VuerVRSource(VRSource):
         # provides the public HTTPS the Quest connects to (works on isolated
         # campus Wi-Fi, no self-signed cert warning). Else: HTTPS on the LAN.
         self.tunnel = bool(v.get("tunnel", False))
-        self.debug = debug
+        self.debug = bool(v.get("debug", debug))
         self._lock = threading.Lock()
         self._frame = VRFrame(hands={s: HandSample() for s in SIDES})
         self._thread: threading.Thread | None = None
@@ -74,24 +74,24 @@ class VuerVRSource(VRSource):
         # with the process. Torque release is the supervisor's job.
         pass
 
-    def _update_hand(self, side: str, wrist_flat, landmarks_flat) -> None:
-        # tracked ONLY when real wrist data arrived — WebXR keeps firing HAND_MOVE
-        # with one hand absent; don't fabricate a tracked hand at the origin.
-        if wrist_flat is None:
+    def _update_hand(self, side: str, mats, state) -> None:
+        # Vuer HAND_MOVE: `mats` = 25 joints x 16 (each a column-major 4x4),
+        # W3C XRHand order, poses relative to the wrist. tracked only when present.
+        if mats is None or len(mats) < 25 * 16:
             with self._lock:
                 self._frame = dataclasses.replace(
                     self._frame, stamp=time.monotonic(),
                     hands={**self._frame.hands, side: HandSample(tracked=False)})
             return
-        lm = None
-        if landmarks_flat is not None and len(landmarks_flat) >= 75:
-            lm = np.asarray(landmarks_flat, dtype=float)[:75].reshape(25, 3)
+        a = np.asarray(mats, dtype=float).reshape(25, 16)
+        landmarks = a[:, 12:15].copy()                  # per-joint translation (cols 12-14)
+        wrist = a[0].reshape(4, 4, order="F")           # joint 0 transform
+        pinch = float(state.get("pinchValue", 0.0)) if isinstance(state, dict) else 0.0
         with self._lock:
             self._frame = dataclasses.replace(
                 self._frame, stamp=time.monotonic(),
                 hands={**self._frame.hands, side: HandSample(
-                    tracked=True, wrist=_mat4(wrist_flat), landmarks=lm,
-                    pinch=_pinch_from_landmarks(lm))})
+                    tracked=True, wrist=wrist, landmarks=landmarks, pinch=pinch)})
 
     def _serve(self) -> None:  # pragma: no cover - needs vuer + a headset
         from vuer import Vuer
@@ -107,9 +107,11 @@ class VuerVRSource(VRSource):
         async def on_hand(event, session):
             val = event.value or {}
             if self.debug:
-                print("HAND_MOVE keys:", list(val.keys()))
-            self._update_hand("left", val.get("leftHand"), val.get("leftLandmarks"))
-            self._update_hand("right", val.get("rightHand"), val.get("rightLandmarks"))
+                lk = val.get("left")
+                print("HAND_MOVE keys:", list(val.keys()),
+                      "| left floats:", (len(lk) if lk is not None else None), flush=True)
+            self._update_hand("left", val.get("left"), val.get("leftState"))
+            self._update_hand("right", val.get("right"), val.get("rightState"))
 
         @app.add_handler("CAMERA_MOVE")
         async def on_cam(event, session):
