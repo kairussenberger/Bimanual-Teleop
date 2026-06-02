@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..hands.retarget_core import OneEuroFilter
-from ..vr.frames import ClutchMapper, HandSample, euler_to_R, mat_to_se3
+from ..vr.frames import ClutchMapper, HandSample, mat_to_se3, r_base_from_vr
 from .ik import ArmIK
 
 
@@ -19,15 +19,17 @@ class ArmController:
         self.side = side
         self.ik = ArmIK(rig, side)
         m = rig["mapping"]
-        R = euler_to_R(np.asarray(m["r_base_from_vr_euler"][side], dtype=float))
-        self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"], abs_orientation=m["abs_orientation"])
+        # Frame derived from THIS arm's real base orientation so "hand forward" →
+        # "robot reaches forward" (not sideways). tweak = optional per-side nudge.
+        R = r_base_from_vr(rig["arms"][side]["base_quat"], m["r_base_from_vr_euler"][side])
+        self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"], abs_orientation=False)
         ws = rig["safety"]["workspace"]
         self.ws_min = np.asarray(ws["min"], dtype=float)
         self.ws_max = np.asarray(ws["max"], dtype=float)
         self.iters = int(rig["ik"].get("iters", 1))
         # lighter smoothing than the fingers -> less arm lag (snappier baseline,
         # beta cuts lag on fast motion). Tune if jittery.
-        self._filt_params = dict(mincutoff=2.5, beta=0.6)
+        self._filt_params = dict(mincutoff=4.0, beta=1.0)
         self.pos_filt = OneEuroFilter(**self._filt_params)
         self._was_engaged = False
 

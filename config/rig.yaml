@@ -22,14 +22,14 @@ arms:
     base_quat: [0.49791, 0.50194, -0.50011, -0.50004]
     hand_pos: [-0.0504, 0.1078, 0.0]   # flange (link5) → ORCA hand base
     hand_euler: [0.0, 3.14159, 0.0]    # palm-down, thumb-inward at home
-    neutral_q: [1.5708, 0.0, 0.0, 0.0, 0.0]   # j1=+90° faces forward; j2..j5=0
+    neutral_q: [1.5708, -0.3, 1.63, 0.0, 0.0]   # j1=+90° forward, elbow bent → room to move in all directions
   right:
     can_channel: can1
     base_pos: [0.0101, 0.0801, 0.6875]
     base_quat: [0.49989, 0.49988, 0.50055, 0.49968]
     hand_pos: [-0.0306, 0.1078, 0.0]
     hand_euler: [0.0, 0.0, 0.0]
-    neutral_q: [4.7124, 0.0, 0.0, 0.0, 0.0]   # j1=270° (=−90° wrapped; range [0,2π])
+    neutral_q: [4.7124, -0.3, 1.63, 0.0, 0.0]   # j1=270° forward, elbow bent (mirror of left)
   # YAM joint limits (rad) from the URDF — used by IK velocity/config limits.
   joint_limits:
     lower: [0.0, -2.879793, -1.396263, -1.570796, -1.570796]
@@ -48,10 +48,13 @@ ik:
   pos_cost: 1.0
   ori_cost: 0.0      # POSITION-ONLY: a 5-DoF arm + uncalibrated VR frame contorts/buckles
                      # when chasing orientation. Re-enable (~0.2) after frame calibration.
-  posture_cost: 0.005 # gentle null-space regularization (damped-LS already avoids buckling)
+  posture_cost: 0.01 # gentle null-space regularization (damped-LS already avoids buckling)
   lm_damping: 1.0e-2 # damped least squares (singularity robustness)
-  max_vel: 8.0       # rad/s per joint — fast tracking (sim; tune down for real hardware)
-  iters: 5           # IK steps per control tick — snappier convergence, less lag
+  max_vel: 12.0      # rad/s per joint — fast tracking (sim; tune down for real hardware)
+  iters: 6           # IK steps per control tick — snappier convergence, less lag
+  # SOFT joint limits = home ± this margin (rad). Caps each joint near home so the
+  # arm physically cannot fold into a buckle. Smaller = safer but less reach.
+  soft_margin: [1.4, 1.0, 1.4, 1.4, 1.5]
   solver: daqp
 
 mapping:

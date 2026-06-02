@@ -32,6 +32,37 @@ class VRFrame:
     hands: dict[str, HandSample] = field(default_factory=dict)
 
 
+def quat_to_R(q) -> np.ndarray:
+    """Quaternion (w, x, y, z) → 3x3 rotation matrix (MuJoCo quat convention)."""
+    w, x, y, z = q
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y)],
+        [2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y)],
+    ])
+
+
+# WebXR reference frame (x=right, y=up, -z=forward) → robot WORLD frame
+# (x, y, z; the robot faces world -X). Columns = where webxr +x,+y,+z land in world:
+# webxr +z (back) → world +X  (so forward -z → -X = robot forward),
+# webxr +y (up)   → world +Z,  webxr +x (right) → world +Y.
+WEBXR_TO_WORLD = np.array([[0.0, 0.0, 1.0],
+                           [1.0, 0.0, 0.0],
+                           [0.0, 1.0, 0.0]])
+
+
+def r_base_from_vr(base_quat, tweak_euler=(0.0, 0.0, 0.0)) -> np.ndarray:
+    """Rotation mapping a wrist displacement in the WebXR frame to a displacement
+    in this arm's IK base frame, so 'hand forward' → 'robot reaches forward'.
+
+    The arm's standalone IK base frame is rotated into the world by `base_quat`,
+    so: R = (world←base)ᵀ · (webxr→world) · tweak  =  base_quatᵀ · WEBXR_TO_WORLD · tweak.
+    `tweak_euler` is an optional small correction (radians) applied in the WebXR
+    frame if an axis still reads inverted."""
+    R_bw = quat_to_R(base_quat)                 # base → world
+    return R_bw.T @ WEBXR_TO_WORLD @ euler_to_R(tweak_euler)
+
+
 def euler_to_R(euler_xyz) -> np.ndarray:
     """Intrinsic XYZ euler (rad) → 3x3 rotation (matches MuJoCo eulerseq XYZ)."""
     cx, cy, cz = np.cos(euler_xyz)

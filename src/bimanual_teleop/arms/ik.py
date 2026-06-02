@@ -21,8 +21,23 @@ class ArmIK:
         self.side = side
         self.joints = [f"{side}_arm_j{i}" for i in range(1, 6)]
         self.model = mujoco.MjModel.from_xml_string(arm_xml(side))
-        self.config = mink.Configuration(self.model)
         ik = rig["ik"]
+        self.q0 = np.asarray(rig["arms"][side]["neutral_q"], dtype=float)
+
+        # SOFT joint limits = home ± margin (clamped to the URDF hard limits),
+        # applied to the model BEFORE building the limit so the IK physically
+        # cannot drive a joint past them — the arm can never fold into a buckle.
+        # Tighter ROM is an accepted trade for never buckling.
+        hard_lo = np.asarray(rig["arms"]["joint_limits"]["lower"], dtype=float)
+        hard_hi = np.asarray(rig["arms"]["joint_limits"]["upper"], dtype=float)
+        margin = np.asarray(ik.get("soft_margin", [1.4, 1.2, 1.4, 1.4, 1.5]), dtype=float)
+        self.soft_lo = np.maximum(self.q0 - margin, hard_lo)
+        self.soft_hi = np.minimum(self.q0 + margin, hard_hi)
+        for i, j in enumerate(self.joints):
+            jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, j)
+            self.model.jnt_range[jid] = [self.soft_lo[i], self.soft_hi[i]]
+
+        self.config = mink.Configuration(self.model)
         self.ee_task = mink.FrameTask(
             frame_name=f"{side}_ee", frame_type="site",
             position_cost=ik["pos_cost"], orientation_cost=ik["ori_cost"],
@@ -31,13 +46,12 @@ class ArmIK:
         self.posture = mink.PostureTask(self.model, cost=ik["posture_cost"])
         self.tasks = [self.ee_task, self.posture]
         self.limits = [
-            mink.ConfigurationLimit(self.model),
+            mink.ConfigurationLimit(self.model),       # now reads the soft ranges
             mink.VelocityLimit(self.model, {j: ik["max_vel"] for j in self.joints}),
         ]
         self.solver = ik.get("solver", "daqp")
         self.damping = float(ik.get("damping", 1e-3))
         self.dt = 1.0 / rig["control"]["arm_hz"]
-        self.q0 = np.asarray(rig["arms"][side]["neutral_q"], dtype=float)
         self.reset()
 
     def reset(self) -> None:
