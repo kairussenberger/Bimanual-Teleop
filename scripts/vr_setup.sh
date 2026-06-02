@@ -4,6 +4,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Free a stale server still holding :8012 (the "address already in use" error).
+STALE="$(lsof -ti tcp:8012 2>/dev/null || true)"
+if [ -n "$STALE" ]; then echo "freeing port 8012 (killing $STALE)"; kill -9 $STALE 2>/dev/null || true; sleep 1; fi
+
 IFACE="$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')"
 IP="$(ipconfig getifaddr "${IFACE:-en0}" 2>/dev/null || true)"
 [ -z "${IP:-}" ] && IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
@@ -15,16 +19,17 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 82
 
 cat <<EOF
 
-  Cert ready for $IP (cert.pem / key.pem).
+  Port 8012 free, cert ready for $IP (cert.pem / key.pem).
 
   1) On the Mac, run:
        uv run mjpython -m bimanual_teleop.launch.run_sim --vr vuer
 
-  2) On the Quest 3 browser, open:
+  2) On the Quest 3 browser, open EXACTLY this (NOT the "vuer.ai?ws=..." line the
+     launcher prints — that one is mixed-content and won't connect):
        https://$IP:8012
      Tap "Advanced -> proceed" on the cert warning, then "Enter VR" and raise
      your hands. The robot follows on the Mac screen.
 
-  Both devices must be on the SAME Wi-Fi. If the page won't load, the network is
-  isolating clients (common on eduroam/campus) — use a phone hotspot, or ngrok.
+  Both devices must be on the SAME network. A phone hotspot (this looks like one)
+  works; isolated eduroam/campus Wi-Fi does NOT — there, use --tunnel instead.
 EOF
