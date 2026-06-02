@@ -25,7 +25,8 @@ class ArmController:
         # "robot reaches forward" (not sideways). Calibration overrides this via
         # mapper.set_R(). tweak = optional per-side nudge.
         R = r_base_from_vr(rig["arms"][side]["base_quat"], m["r_base_from_vr_euler"][side])
-        self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"], abs_orientation=False)
+        self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"],
+                                   abs_orientation=m.get("abs_orientation", True))
         # Anti-cross guard: keep this hand on its own side of the world Y axis so
         # the two arms can never overlap. left stays y ≤ -gap, right stays y ≥ +gap.
         self.base_R = quat_to_R(rig["arms"][side]["base_quat"])   # base → world

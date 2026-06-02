@@ -46,8 +46,8 @@ control:
 
 ik:
   pos_cost: 1.0
-  ori_cost: 0.0      # POSITION-ONLY: a 5-DoF arm + uncalibrated VR frame contorts/buckles
-                     # when chasing orientation. Re-enable (~0.2) after frame calibration.
+  ori_cost: 0.3      # track wrist orientation, best-effort (5-DoF can't match it fully).
+                     # Kept well below pos_cost so position dominates; soft limits stop buckling.
   posture_cost: 0.01 # gentle null-space regularization (damped-LS already avoids buckling)
   lm_damping: 1.0e-2 # damped least squares (singularity robustness)
   max_vel: 12.0      # rad/s per joint — fast tracking (sim; tune down for real hardware)
