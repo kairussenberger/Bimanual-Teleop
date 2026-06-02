@@ -19,7 +19,7 @@ class ArmIK:
     def __init__(self, rig: dict, side: str):
         from ..sim.model import arm_xml  # shared model source
         self.side = side
-        self.joints = [f"{side}_arm_j{i}" for i in range(1, 6)]
+        self.joints = [f"{side}_arm_j{i}" for i in range(1, 7)]   # 6-DoF
         self.model = mujoco.MjModel.from_xml_string(arm_xml(side))
         ik = rig["ik"]
         self.q0 = np.asarray(rig["arms"][side]["neutral_q"], dtype=float)

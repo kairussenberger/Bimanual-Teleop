@@ -24,7 +24,7 @@ from ..hands.joint_map import ActuatorRef, parse_actuators
 
 YAM_DIR = Path(__file__).parent / "models" / "yam_real"
 STAND = YAM_DIR / "assets" / "stand"
-ARM_JOINTS = [f"arm_j{i}" for i in range(1, 6)]   # 5-DoF
+ARM_JOINTS = [f"arm_j{i}" for i in range(1, 7)]   # 6-DoF (j6 = wrist roll)
 
 
 def _orca_model_dir() -> Path:
@@ -73,7 +73,7 @@ class SimInfo:
     def arm_qadr(self, side: str) -> list[int]:
         m = self.model
         return [int(m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_arm_j{i}")])
-                for i in range(1, 6)]
+                for i in range(1, 7)]
 
 
 def _base_scene_xml() -> str:
@@ -104,8 +104,8 @@ def build_model(rig: dict) -> SimInfo:
         a = rig["arms"][side]
         base = spec.worldbody.add_frame(name=f"{side}_base", pos=a["base_pos"], quat=a["base_quat"])
         spec.attach(mujoco.MjSpec.from_string(arm_xml(side)), prefix="", frame=base)
-        link5 = spec.body(f"{side}_arm_link5")
-        flange = link5.add_frame(name=f"{side}_flange", pos=a["hand_pos"], euler=a["hand_euler"])
+        link6 = spec.body(f"{side}_arm_link6")   # hand mounts AFTER the wrist-roll joint
+        flange = link6.add_frame(name=f"{side}_flange", pos=a["hand_pos"], euler=a["hand_euler"])
         # Hands get a per-side prefix so the two ORCA models' shared materials/
         # defaults (white/black/... from options.xml) don't collide. Arms stay
         # unprefixed (rgba only, no clash) → clean joint names left_arm_j1 etc.
@@ -116,7 +116,7 @@ def build_model(rig: dict) -> SimInfo:
     info = SimInfo(model=model, actuators=refs)
     for side in SIDES:
         arm = {r.target: r.id for r in refs if r.kind == "arm" and r.side == side}
-        info.arm_act[side] = [arm[f"arm_j{i}"] for i in range(1, 6)]
+        info.arm_act[side] = [arm[f"arm_j{i}"] for i in range(1, 7)]
         info.hand_act[side] = [(r.id, r.target) for r in refs if r.kind == "hand" and r.side == side]
         info.ee_site[side] = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{side}_ee")
     return info

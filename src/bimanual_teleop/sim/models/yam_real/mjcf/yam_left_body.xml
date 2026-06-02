@@ -44,9 +44,15 @@
                    pos = circle - Ry(pi)*square. euler "0 pi 0" = 180deg roll about
                    the finger axis -> palm-DOWN, thumb-INWARD at -X home (right arm
                    uses euler 0 to match). -->
-              <!-- flange→hand mount point: IK end-effector site AND where model.py
-                   attaches the ORCA hand. pos/euler from the friend's CAD. -->
-              <site name="left_ee" pos="-0.0504 0.1078 0" euler="0 3.14159 0" size="0.01" rgba="1 0 0 1" group="1"/>
+              <!-- link6 = WRIST ROLL (j6). The i2rt YAM is 6-DoF; this 6th joint
+                   (replaced/omitted in the 5-DoF URDF) rolls about the wrist→hand
+                   approach axis (= normalized hand offset). The ORCA hand mounts on
+                   link6, and the IK end-effector site lives here. -->
+              <body name="left_arm_link6" pos="0 0 0" gravcomp="1">
+                <inertial pos="-0.0504 0.1078 0" mass="0.3" diaginertia="3e-4 3e-4 3e-4"/>
+                <joint name="left_arm_j6" axis="-0.4235 0.9059 0" range="-2.0944 2.0944"/>
+                <site name="left_ee" pos="-0.0504 0.1078 0" euler="0 3.14159 0" size="0.01" rgba="1 0 0 1" group="1"/>
+              </body>
             </body>
           </body>
         </body>

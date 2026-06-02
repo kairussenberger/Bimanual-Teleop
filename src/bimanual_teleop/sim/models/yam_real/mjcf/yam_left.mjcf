@@ -18,5 +18,6 @@
     <position name="left_arm_j3_actuator" joint="left_arm_j3" kp="600" kv="30" forcerange="-300 300" ctrlrange="-1.396263 2.443461"/>
     <position name="left_arm_j4_actuator" joint="left_arm_j4" kp="600" kv="30" forcerange="-300 300" ctrlrange="-1.570796 1.570796"/>
     <position name="left_arm_j5_actuator" joint="left_arm_j5" kp="600" kv="30" forcerange="-300 300" ctrlrange="-1.570796 1.570796"/>
+    <position name="left_arm_j6_actuator" joint="left_arm_j6" kp="300" kv="15" forcerange="-150 150" ctrlrange="-2.0944 2.0944"/>
   </actuator>
 </mujoco>
