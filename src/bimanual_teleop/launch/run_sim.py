@@ -85,6 +85,17 @@ def _free_port(port: int = 8012) -> None:
             pass
 
 
+def _wait_port(port: int = 8012, timeout: float = 15.0) -> None:
+    import socket
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket() as s:
+            s.settimeout(0.5)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return
+        time.sleep(0.3)
+
+
 def _lan_ip() -> str:
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -113,18 +124,20 @@ def run_viewer(args) -> int:
         rig["vr"]["debug"] = True
     if (args.vr == "vuer") or args.tunnel or rig["vr"].get("transport") == "vuer":
         _free_port(8012)                       # clear any stuck server from a prior run
-    tunnel = None
     if args.tunnel:
         rig["vr"]["transport"] = "vuer"
         rig["vr"]["tunnel"] = True
-        tunnel = _start_tunnel()
-    elif (args.vr == "vuer") or rig["vr"].get("transport") == "vuer":
-        _print_lan_url()
     world = SimWorld(rig)
     engine = TeleopEngine(rig, world)
     supervisor = Supervisor(rig, AlwaysOn())
     src = make_source(rig)
     src.start()
+    tunnel = None
+    if args.tunnel:
+        _wait_port(8012)            # server must be listening BEFORE cloudflared (else 502)
+        tunnel = _start_tunnel()
+    elif (args.vr == "vuer") or rig["vr"].get("transport") == "vuer":
+        _print_lan_url()
     try:
         with mujoco.viewer.launch_passive(world.model, world.data) as v:
             while v.is_running():
