@@ -102,17 +102,13 @@ class VuerVRSource(VRSource):
                     tracked=True, wrist=wrist, landmarks=landmarks, pinch=pinch)})
 
     def _op_frame_mat(self, side: str):
-        """Operator hand-frame 4x4 (col-major, WebXR) for the viz: orientation = the
-        hand frame the MAPPING uses, position = the wrist."""
-        from ..hands.quest_retarget import hand_frame
+        """Operator wrist pose (the EXACT WebXR frame the orientation mapping
+        consumes) as a col-major 4x4, for the in-headset viz."""
         with self._lock:
             h = self._frame.hands.get(side)
-        if h is None or not h.tracked or h.landmarks is None:
+        if h is None or not h.tracked:
             return None
-        R = hand_frame(h.landmarks)[1]
-        p = np.asarray(h.wrist, float).reshape(4, 4)[:3, 3]
-        M = np.eye(4); M[:3, :3] = R; M[:3, 3] = p
-        return list(M.reshape(-1, order="F"))
+        return list(np.asarray(h.wrist, float).reshape(4, 4).reshape(-1, order="F"))
 
     def _serve(self) -> None:  # pragma: no cover - needs vuer + a headset
         from vuer import Vuer
