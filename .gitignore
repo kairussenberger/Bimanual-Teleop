@@ -10,3 +10,4 @@ key.pem
 # Logs / recordings
 *.log
 recordings/
+.vr_url

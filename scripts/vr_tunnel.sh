@@ -3,16 +3,23 @@
 # isolated campus Wi-Fi). Start this ONCE and leave it running; bookmark the URL
 # on the Quest. Then run the sim with `--vr vuer --http` (restart it freely; the
 # URL stays the same). No account needed.
+#
+# Shows ONLY the link (cloudflared's log spam is hidden) and saves it to
+# .vr_url so you can always retrieve it:   cat ~/Developer/bimanual-teleop/.vr_url
 set -euo pipefail
+cd "$(dirname "$0")/.."
 command -v cloudflared >/dev/null || { echo "cloudflared not found — run: brew install cloudflared"; exit 1; }
 
-# Run cloudflared, watch its output for the URL, and print it in a big banner.
+echo "Starting tunnel... (the link appears in a few seconds)"
 cloudflared tunnel --url http://localhost:8012 2>&1 | while IFS= read -r line; do
-  echo "$line"
   url=$(printf '%s' "$line" | grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' || true)
   if [ -n "${url:-}" ]; then
-    printf '\n========================================================\n'
-    printf '  OPEN THIS ON THE QUEST 3 (and bookmark it):\n    %s\n' "$url"
-    printf '========================================================\n\n'
+    printf '%s\n' "$url" > .vr_url
+    printf '\n=========================================================\n'
+    printf '  OPEN THIS ON THE QUEST 3 BROWSER (and bookmark it):\n\n      %s\n\n' "$url"
+    printf '  (also saved to .vr_url — leave this terminal running)\n'
+    printf '=========================================================\n\n'
+  elif printf '%s' "$line" | grep -qE 'ERR |error|failed|fatal'; then
+    printf 'tunnel: %s\n' "$line"      # surface problems, hide the rest of the noise
   fi
 done
