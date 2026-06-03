@@ -115,6 +115,23 @@ def _print_lan_url() -> None:
           + "  Accept the cert warning, Enter VR, raise your hands.\n" + "=" * 64 + "\n", flush=True)
 
 
+def _push_robot_frames(src, engine, frame) -> None:
+    """Send each robot hand frame, expressed in the headset frame, to the Vuer viz
+    next to the operator's hand. robot_R_webxr = R_base_from_vrᵀ · ee_R_base."""
+    import numpy as np
+    from ..config import SIDES
+    for s in SIDES:
+        hs = frame.hands.get(s)
+        ac = engine.arm[s]
+        if hs is None or not hs.tracked or ac.mapper.R is None:
+            continue
+        ee_R = ac.ik.fk_ee().rotation().as_matrix()
+        R_webxr = ac.mapper.R.T @ ee_R                       # robot hand orientation in headset frame
+        pos = np.asarray(hs.wrist, float).reshape(4, 4)[:3, 3] + np.array([0.13, 0.0, 0.0])  # beside the hand
+        M = np.eye(4); M[:3, :3] = R_webxr; M[:3, 3] = pos
+        src.set_robot_frame(s, M.reshape(-1, order="F"))
+
+
 def run_viewer(args) -> int:
     import mujoco.viewer
     rig = load_rig()
@@ -142,12 +159,15 @@ def run_viewer(args) -> int:
         tunnel = _start_tunnel()
     elif (args.vr == "vuer") or rig["vr"].get("transport") == "vuer":
         _print_lan_url()
+    push_viz = hasattr(src, "set_robot_frame")    # in-headset frame visualization (Vuer)
     try:
         with mujoco.viewer.launch_passive(world.model, world.data) as v:
             while v.is_running():
                 t = time.monotonic()   # one clock shared with the source stamps + supervisor
                 frame = src.latest()
                 engine.tick(frame, supervisor.update(frame, t), t)
+                if push_viz and frame is not None:
+                    _push_robot_frames(src, engine, frame)
                 world.step(2)
                 v.sync()
                 time.sleep(1 / 120)

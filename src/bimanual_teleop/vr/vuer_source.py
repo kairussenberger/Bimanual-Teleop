@@ -57,8 +57,15 @@ class VuerVRSource(VRSource):
         self._dbg = {"hand": 0, "cam": 0, "ctrl": 0, "last": ""}
         self._lock = threading.Lock()
         self._frame = VRFrame(hands={s: HandSample() for s in SIDES})
+        self._robot_viz: dict[str, list] = {}   # side -> 16-float col-major matrix (robot hand frame, WebXR)
         self._thread: threading.Thread | None = None
         self._app = None
+
+    def set_robot_frame(self, side: str, mat16) -> None:
+        """Push the robot's hand frame (4x4 in the WebXR/headset frame) for the
+        in-headset visualization. Called from the control loop."""
+        with self._lock:
+            self._robot_viz[side] = list(np.asarray(mat16, dtype=float).reshape(-1))
 
     def latest(self) -> VRFrame | None:
         # Return an atomic snapshot so a control tick can't read a half-updated
@@ -94,9 +101,22 @@ class VuerVRSource(VRSource):
                 hands={**self._frame.hands, side: HandSample(
                     tracked=True, wrist=wrist, landmarks=landmarks, pinch=pinch)})
 
+    def _op_frame_mat(self, side: str):
+        """Operator hand-frame 4x4 (col-major, WebXR) for the viz: orientation = the
+        hand frame the MAPPING uses, position = the wrist."""
+        from ..hands.quest_retarget import hand_frame
+        with self._lock:
+            h = self._frame.hands.get(side)
+        if h is None or not h.tracked or h.landmarks is None:
+            return None
+        R = hand_frame(h.landmarks)[1]
+        p = np.asarray(h.wrist, float).reshape(4, 4)[:3, 3]
+        M = np.eye(4); M[:3, :3] = R; M[:3, 3] = p
+        return list(M.reshape(-1, order="F"))
+
     def _serve(self) -> None:  # pragma: no cover - needs vuer + a headset
         from vuer import Vuer
-        from vuer.schemas import Hands
+        from vuer.schemas import Hands, CoordsMarker
 
         if self.tunnel:
             app = Vuer(host="127.0.0.1")                                  # http; tunnel adds https
@@ -130,9 +150,21 @@ class VuerVRSource(VRSource):
             print("[vuer] >>> QUEST CONNECTED — entered the page <<<", flush=True)
             session.upsert @ Hands(stream=True, key="hands")
             import asyncio
+            tick = 0
             while True:
-                await asyncio.sleep(2.0)
-                if self.debug:
+                await asyncio.sleep(1.0 / 30)
+                # In-headset frame visualization: a BIG bright triad on each wrist
+                # = YOUR hand frame; a smaller triad = the ROBOT's hand frame.
+                # Compare them to see the mapping. (X=red, Y=green, Z=blue.)
+                for side in SIDES:
+                    op = self._op_frame_mat(side)
+                    if op is not None:
+                        session.upsert @ CoordsMarker(key=f"op_{side}", matrix=op, scale=0.12, headScale=1.5)
+                    rb = self._robot_viz.get(side)
+                    if rb is not None:
+                        session.upsert @ CoordsMarker(key=f"rb_{side}", matrix=rb, scale=0.08, headScale=1.0)
+                tick += 1
+                if self.debug and tick % 60 == 0:
                     d = self._dbg
                     print(f"[vuer] head_msgs={d['cam']} hand_msgs={d['hand']} "
                           f"controller_msgs={d['ctrl']} | last_hand: {d['last'] or '(none)'}", flush=True)
