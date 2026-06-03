@@ -54,13 +54,15 @@ class TeleopEngine:
                       f"measuring your frame for {self.calib_s:.0f}s...", flush=True)
                 self._prompted = True
         if self._calib_t0 is not None and (t - self._calib_t0) >= self.calib_s:
-            applied = []
             for s in SIDES:
-                R = self.calibrator.compute(s)
-                if R is not None:
-                    self.arm[s].mapper.set_R(R)                     # position frame
-                    self.arm[s].set_ref_frame(self.calibrator.ref_frame(s))  # wrist-rotation zero
-                    applied.append(s)
-            print(f"[calib] done (calibrated: {applied or 'none — using defaults'}). "
-                  "Arms now follow your hands.", flush=True)
+                r = self.calibrator.result(s)
+                if r is None:
+                    print(f"[calib] {s}: NOT tracked — using default frame.", flush=True)
+                    continue
+                self.arm[s].mapper.set_R(r["R"])
+                self.arm[s].set_ref_frame(r["ref"])
+                tag = "OK" if r["ok"] else "SHAKY (hold stiller & recalibrate)"
+                print(f"[calib] {s}: {tag} | stillness={r['std']*1000:.0f}mm "
+                      f"| forward≈{r['forward'].round(2)} up≈{r['up'].round(2)}", flush=True)
+            print("[calib] done — arms now follow your hands. (Restart to recalibrate.)", flush=True)
             self.calibrated = True

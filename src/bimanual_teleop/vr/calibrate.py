@@ -65,17 +65,29 @@ class Calibrator:
     def count(self, side: str) -> int:
         return len(self._samples[side])
 
-    def compute(self, side: str) -> np.ndarray | None:
-        s = self._samples[side]
-        if len(s) < 5:
-            return None
-        return calibrate_R(np.mean(np.stack(s), axis=0), self.rig["arms"][side]["base_quat"])
-
-    def ref_frame(self, side: str) -> np.ndarray | None:
-        """Reference hand frame (continuous, no gravity flip) at the calibration
-        stance — the zero for wrist-rotation tracking. Columns [lateral, forward, normal]."""
+    def result(self, side: str) -> dict | None:
+        """Rigorous calibration for one side over the most-settled sample window.
+        Returns {R, ref, ok, std, forward, up} or None if too few samples. `ok` is
+        False when the hand wasn't held still enough (high variance) → re-calibrate."""
         from ..hands.quest_retarget import hand_frame
         s = self._samples[side]
-        if len(s) < 5:
+        if len(s) < 8:
             return None
-        return hand_frame(np.mean(np.stack(s), axis=0))[1]
+        arr = np.stack(s[-30:])                                   # most-settled window
+        avg = arr.mean(axis=0)
+        fwd = arr[:, [W_INDEX_TIP, W_MID_TIP, W_RING_TIP], :].mean(1) - arr[:, W_WRIST, :]
+        std = float(np.linalg.norm(fwd.std(axis=0)))              # how still the hand was held
+        R = calibrate_R(avg, self.rig["arms"][side]["base_quat"])
+        Op = operator_axes(avg)
+        ok = std < 0.02 and bool(np.isfinite(R).all())
+        return {"R": R, "ref": hand_frame(avg)[1], "ok": ok, "std": std,
+                "forward": Op[:, 2], "up": Op[:, 1]}
+
+    # Back-compat thin wrappers
+    def compute(self, side: str) -> np.ndarray | None:
+        r = self.result(side)
+        return r["R"] if r else None
+
+    def ref_frame(self, side: str) -> np.ndarray | None:
+        r = self.result(side)
+        return r["ref"] if r else None
