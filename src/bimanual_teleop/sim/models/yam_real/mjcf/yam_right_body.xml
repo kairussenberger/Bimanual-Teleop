@@ -29,6 +29,9 @@
           <body name="right_arm_link4" pos="0.06 0.241549 -0.00205" gravcomp="1">
             <inertial pos="0.0543495 0.0570603 -0.0330658" quat="0.253742 0.371718 0.626251 0.636593" mass="1.81627" diaginertia="0.00318152 0.0030776 0.00114988"/>
             <joint name="right_arm_j4" axis="0 0 1" range="-1.570796 1.570796"/>
+            <!-- wrist pivot: invariant to j4/j5/j6, used as the POSITION IK target so
+                 wrist rotation never makes the arm compensate. -->
+            <site name="right_wrist" pos="0 0 0" size="0.012" rgba="0 1 0 0.6" group="1"/>
             <geom mesh="right_arm_link4" pos="-0.17198 -0.460728 -0.016392"/>
             <body name="right_arm_link5" pos="0.0403 0.070162 -0.0339" gravcomp="1">
               <inertial pos="-0.037954 0.0123024 1.93088e-06" quat="0.404826 0.579755 -0.404826 0.579755" mass="1.3789" diaginertia="0.000865 0.000778447 0.000614553"/>

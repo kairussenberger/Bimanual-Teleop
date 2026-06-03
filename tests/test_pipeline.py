@@ -54,12 +54,12 @@ def test_arm_ik_converges():
     from bimanual_teleop.arms.ik import ArmIK
     from bimanual_teleop.config import load_rig
     ik = ArmIK(load_rig(), "left")
-    T0 = ik.fk_ee()
+    T0 = ik.fk_wrist()                 # position IK targets the WRIST site
     tgt = T0.translation() + np.array([0.07, 0.0, -0.05])
-    target = mink.SE3.from_rotation_and_translation(T0.rotation(), tgt)
+    target = mink.SE3.from_rotation_and_translation(ik.fk_ee().rotation(), tgt)
     for _ in range(300):
         ik.solve(target)
-    assert np.linalg.norm(ik.fk_ee().translation() - tgt) < 5e-3
+    assert np.linalg.norm(ik.fk_wrist().translation() - tgt) < 5e-3
 
 
 def test_supervisor_estop_and_staleness():
@@ -145,20 +145,21 @@ def test_calibration_aligns_forward_and_no_cross():
         ac = ArmController(rig, side)
         ac.mapper.set_R(calibrate_R(lm, rig["arms"][side]["base_quat"]))
         bR = quat_to_R(rig["arms"][side]["base_quat"]); bp = np.array(rig["arms"][side]["base_pos"])
+        wp = lambda: bR @ ac.ik.fk_wrist().translation() + bp     # wrist position in world (the IK target)
         ac.ik.reset(); t = 0.0
         ac.update(HandSample(tracked=True, wrist=wm([0, 0, 0]), landmarks=lm), True, t)
-        x0 = (bR @ ac.ik.fk_ee().translation() + bp)[0]
+        x0 = wp()[0]
         for _ in range(45):
             t += 1 / 120
             ac.update(HandSample(tracked=True, wrist=wm([0, 0, -0.25]), landmarks=lm), True, t)
-        assert (bR @ ac.ik.fk_ee().translation() + bp)[0] < x0 - 0.02      # forward = −X
+        assert wp()[0] < x0 - 0.02      # forward = −X
         # shove toward center; must stay on own side
         ac.ik.reset(); t = 0.0
         ac.update(HandSample(tracked=True, wrist=wm([0, 0, 0]), landmarks=lm), True, t)
         for _ in range(80):
             t += 1 / 120
             ac.update(HandSample(tracked=True, wrist=wm([-sign * 0.5, 0, 0]), landmarks=lm), True, t)
-        y = (bR @ ac.ik.fk_ee().translation() + bp)[1]
+        y = wp()[1]
         assert (y <= 0.001) if side == "left" else (y >= -0.001)
 
 

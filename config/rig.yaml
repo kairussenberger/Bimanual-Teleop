@@ -46,11 +46,7 @@ control:
 
 ik:
   pos_cost: 1.0
-  ori_cost: 0.0      # POSITION-ONLY IK on j1-j3. Wrist orientation is driven DIRECTLY into
-                     # j4 (pitch) / j5 (yaw) / j6 (roll), so the arm never swings to orient.
-  wrist_max_vel: 0.02  # freeze j4-j6 in the IK; we set them ourselves from the operator's wrist
-  wrist_gain: 1.0      # rad of joint per rad of wrist rotation
-  wrist_signs: { left: [1, 1, 1], right: [1, 1, 1] }   # per-side [j4,j5,j6] sign (flip if inverted)
+  ori_cost: 1.0      # orientation-stage weight (stage 2 solves j4-j6 to match the hand orientation)
   posture_cost: 0.01 # gentle null-space regularization (damped-LS already avoids buckling)
   lm_damping: 1.0e-2 # damped least squares (singularity robustness)
   max_vel: 12.0      # rad/s per joint — fast tracking (sim; tune down for real hardware)
