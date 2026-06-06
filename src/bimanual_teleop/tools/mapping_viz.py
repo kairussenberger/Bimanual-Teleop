@@ -89,8 +89,10 @@ def main() -> int:
     cal = Calibrator(rig)
     for s in SIDES:
         for _ in range(10):
-            cal.add(s, _ref_landmarks())
-        engine.arm[s].mapper.set_R(cal.compute(s))
+            cal.add(s, _ref_landmarks(), np.eye(4))      # ref wrist = identity in this harness
+        r = cal.result(s)
+        engine.arm[s].mapper.set_R(r["R"])
+        engine.arm[s].set_ori_calib(r["wrist_ref"], r["op_axes"])   # wrist-twist → j6 correspondence
 
     base = {s: (quat_to_R(rig["arms"][s]["base_quat"]), np.array(rig["arms"][s]["base_pos"])) for s in SIDES}
     renderer = mujoco.Renderer(world.model, height=720, width=1000)

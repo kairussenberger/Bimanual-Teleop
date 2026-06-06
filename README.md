@@ -1,7 +1,8 @@
 # bimanual-teleop
 
-VR teleoperation for a **torso humanoid**: two **i2rt YAM** arms (5-DoF — the 6th
-joint is the **ORCA hand** mount) on an AgileX Ranger stand, driven by **Meta
+VR teleoperation for a **torso humanoid**: two **i2rt YAM** arms (6-DoF — the 6th
+joint is a real wrist-roll motor at the flange, carrying the **ORCA hand**) on an
+AgileX Ranger stand, driven by **Meta
 Quest 3 / 3S** hand-tracking. Your arms move the robot's arms (Cartesian IK); your
 fingers move its fingers (retargeting).
 
@@ -87,9 +88,18 @@ plausible layout. Dial them to your real aluminium frame:
 - **Mounts / rest pose**: `arms.*.mount_pos`, `mount_euler`, `hand_euler`,
   `neutral_q`. Eyeball with `sim_world.py --snap` until the arms+hands sit right.
 - **Frame alignment** (the #1 teleop bug — "I move +X, the robot moves wrong"):
-  run `uv run python -m bimanual_teleop.tools.frame_check --side left` to see how
-  each base-frame axis maps to the world, then set `mapping.r_base_from_vr_euler`
-  (mirrored per arm) and `mapping.abd_mirror` (finger spread direction).
+  the mapping is wrist-pose → EE target (NOT joint-to-joint), so what bites is
+  *frame convention*, not kinematics. Two tools:
+  - `uv run python -m bimanual_teleop.tools.frame_check --side left` — static
+    snapshots of where each base-frame axis lands in the world.
+  - `uv run mjpython -m bimanual_teleop.tools.mapping_studio` — **live side-by-side
+    studio**: your hand (25-joint skeleton + wrist triad) floats beside the robot
+    arm; SOLID frame/arrow = the robot's actual EE, FAINT = what you're commanding.
+    Tune `r_base_from_vr` (I/K pitch, J/L yaw, U/O roll) and `pos_scale` (`-`/`=`)
+    with keys and watch faint and solid converge. Runs on synthetic motion with no
+    headset; add `--vr vuer` for your real Quest, `--gif out.gif` for a headless clip.
+  Then write the values you settle on into `mapping.r_base_from_vr_euler` (mirrored
+  per arm) and `mapping.abd_mirror` (finger spread direction).
 - **Feel**: `mapping.pos_scale`, `ik.*` (costs/limits), One-Euro smoothing in
   `hands/retarget_core.py`.
 - **Clutch / deadman**: hand-tracking has no buttons, so "follow me" is an explicit
@@ -141,9 +151,12 @@ src/bimanual_teleop/
   safety/ states.py clutch.py supervisor.py
   sim/   model.py            mjSpec composition (AgileX stand + 2 YAM + 2 ORCA); arm_xml() shared with IK
          sim_world.py        MjModel/MjData, apply commands, viewer/snapshots
-         models/yam_real/    vendored 5-DoF YAM arms + AgileX stand (CAD-measured)
+         models/yam_real/    vendored 6-DoF YAM arms + AgileX stand (CAD-measured)
+  viz/   overlay.py           shared MjvScene primitives (triad/arrow/skeleton)
   launch/ run_sim.py run_hw.py
-  tools/  frame_check.py
+  tools/  frame_check.py       static base-axis → world snapshots
+          mapping_viz.py       scripted-gesture GIF + per-phase error table
+          mapping_studio.py    live operator↔robot side-by-side + frame tuning knobs
   bus/   topics.py zmq_io.py  latest-value PUB/SUB for the multi-process path
 tests/test_pipeline.py
 ```
@@ -158,22 +171,23 @@ ZMQ latest-value bus, hardware driver seam.
 a small tweak — use `--debug`); tune mounts/frames to the real chassis; split the
 hardware path into per-arm ~250 Hz CAN processes over `bus/` for production rates.
 
-## The robot model (5-DoF, real geometry)
+## The robot model (6-DoF, real geometry)
 
-The arms are **5-DoF** — the YAM's 6th joint (wrist roll) is replaced by the ORCA
-hand mount. The arm meshes, the **AgileX Ranger stand**, the per-arm base poses
-(ICP-registered to CAD, RMS ~1.3 mm), the flange→hand transforms, and the
-face-forward home pose all come from
+The arms are **6-DoF** — the YAM's wrist-roll joint (j6) is a real motor on link5's
+circular flange (axis = the mesh-measured flange normal from the friend's CAD); the
+ORCA hand bolts onto link6, after that joint. The arm meshes, the **AgileX Ranger
+stand**, the per-arm base poses (ICP-registered to CAD, RMS ~1.3 mm), the
+flange→hand transforms, and the face-forward home pose all come from
 [kairussenberger/Orca-Yam-teleop](https://github.com/kairussenberger/Orca-Yam-teleop)
-and are vendored under `sim/models/yam_real/`. A 5-joint arm can't reach an
-arbitrary 6-DoF pose, so IK weights position above orientation (`ik.pos_cost >
-ik.ori_cost`) — the flange tracks position well, orientation best-effort (the
-fixed wrist roll lives in the hand mount). The one thing still to calibrate before
-hardware is `mapping.r_base_from_vr_euler` (run `tools/frame_check.py`).
+and are vendored under `sim/models/yam_real/`. Teleop runs a **two-stage diff-IK**
+per arm: stage 1 places the wrist with j1–j3, stage 2 orients the end-effector with
+j4–j6 (so a wrist twist lands on j6 rather than swinging the forearm). The one thing
+still to calibrate before hardware is `mapping.r_base_from_vr_euler` (run the
+`tools/mapping_studio` frame tuner).
 
 ## Provenance / licenses
 
-- 5-DoF YAM arm model + AgileX stand under `sim/models/yam_real/`: from
+- 6-DoF YAM arm model + AgileX stand under `sim/models/yam_real/`: from
   [kairussenberger/Orca-Yam-teleop](https://github.com/kairussenberger/Orca-Yam-teleop)
   (the real rig's MuJoCo setup), itself derived from the i2rt YAM URDF.
 - ORCA hand models are referenced from the sibling `orca_sim` package.
