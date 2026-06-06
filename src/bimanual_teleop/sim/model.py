@@ -85,14 +85,25 @@ def _base_scene_xml() -> str:
   <asset>
     <mesh name="stand_part0" file="{STAND / 'frame_part0.stl'}" scale="0.001 0.001 0.001"/>
     <mesh name="stand_part1" file="{STAND / 'frame_part1.stl'}" scale="0.001 0.001 0.001"/>
+    <mesh name="stand_part2" file="{STAND / 'frame_part2.stl'}" scale="0.001 0.001 0.001"/>
+    <mesh name="stand_part3" file="{STAND / 'frame_part3.stl'}" scale="0.001 0.001 0.001"/>
+    <mesh name="stand_part4" file="{STAND / 'frame_part4.stl'}" scale="0.001 0.001 0.001"/>
+    <mesh name="stand_part5" file="{STAND / 'frame_part5.stl'}" scale="0.001 0.001 0.001"/>
   </asset>
   <worldbody>
     <light pos="0.4 -0.4 2.5" dir="-0.2 0.2 -1" directional="true"/>
     <light pos="-0.6 0.6 2.0" dir="0.3 -0.3 -1"/>
     <geom name="floor" type="plane" size="3 3 0.1" rgba="0.3 0.3 0.35 1" contype="0" conaffinity="0"/>
-    <body name="stand" pos="0 0 0.2475">
+    <!-- Real ELONGATED AgileX frame (Kai's c2814b4): 6-part mesh, +0.5 m taller so
+         the arm mounts sit at z~1.19. Feet (mesh min z -0.2139) on the floor; small
+         XY offset re-aligns the registration. Replaces the earlier box-riser hack. -->
+    <body name="stand" pos="0.0017 -0.0210 0.2139">
       <geom type="mesh" mesh="stand_part0" contype="0" conaffinity="0" rgba="0.62 0.64 0.68 1"/>
       <geom type="mesh" mesh="stand_part1" contype="0" conaffinity="0" rgba="0.62 0.64 0.68 1"/>
+      <geom type="mesh" mesh="stand_part2" contype="0" conaffinity="0" rgba="0.62 0.64 0.68 1"/>
+      <geom type="mesh" mesh="stand_part3" contype="0" conaffinity="0" rgba="0.62 0.64 0.68 1"/>
+      <geom type="mesh" mesh="stand_part4" contype="0" conaffinity="0" rgba="0.62 0.64 0.68 1"/>
+      <geom type="mesh" mesh="stand_part5" contype="0" conaffinity="0" rgba="0.62 0.64 0.68 1"/>
     </body>
   </worldbody>
 </mujoco>"""

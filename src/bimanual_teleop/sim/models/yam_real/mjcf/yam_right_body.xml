@@ -45,11 +45,13 @@
                    (-9.9,-58,0) mm). euler 0 leaves this hand palm-DOWN, thumb INWARD
                    at the -X home (left uses "0 pi 0" to match; the L/R 180deg offset
                    comes from the two arms being 180deg-about-Z copies). -->
-              <!-- link6 = WRIST ROLL (j6); see left body for rationale. Axis = the
-                   normalized hand offset (wrist→hand approach), right-side values. -->
+              <!-- link6 = WRIST ROLL (j6); see left body for rationale. axis (0 1 0)
+                   = the mesh-measured flange normal in the link5 frame, pos = the
+                   flange center (same CAD circle ctr as the left arm); supersedes the
+                   earlier normalized-hand-offset guess. range = real ±120°. -->
               <body name="right_arm_link6" pos="0 0 0" gravcomp="1">
                 <inertial pos="-0.0306 0.1078 0" mass="0.3" diaginertia="3e-4 3e-4 3e-4"/>
-                <joint name="right_arm_j6" axis="-0.2733 0.9619 0" range="-2.0944 2.0944"/>
+                <joint name="right_arm_j6" axis="0 1 0" pos="-0.0405 0.0498 0" range="-2.0944 2.0944"/>
                 <site name="right_ee" pos="-0.0306 0.1078 0" euler="0 0 0" size="0.01" rgba="1 0 0 1" group="1"/>
               </body>
             </body>

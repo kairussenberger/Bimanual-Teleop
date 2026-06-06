@@ -18,18 +18,18 @@ arms:
   # transform; neutral_q is the home pose (j1=±90° → arms face forward, world −X).
   left:
     can_channel: can0                  # hardware (Linux): SocketCAN interface for this arm
-    base_pos: [-0.0248, -0.1700, 0.6908]
+    base_pos: [-0.0248, -0.1700, 1.1908]   # Kai c2814b4: +0.5m on the real elongated stand (0.69->1.19)
     base_quat: [0.49791, 0.50194, -0.50011, -0.50004]
     hand_pos: [-0.0504, 0.1078, 0.0]   # flange (link5) → ORCA hand base
     hand_euler: [0.0, 3.14159, 0.0]    # palm-down, thumb-inward at home
-    neutral_q: [1.671, -1.0, 1.825, 0.0, 0.0, 0.0]   # 6-DoF: forward + own (-Y) side, elbow bent; j6 (roll)=0
+    neutral_q: [3.137, -0.004, 0.305, -0.162, -0.003, -1.571]   # FROZEN official rest pose — see docs/RESTING_POSE.md, DO NOT CHANGE. ragdoll hang + j6 -90° palm-inward
   right:
     can_channel: can1
-    base_pos: [0.0101, 0.0801, 0.6875]
+    base_pos: [0.0101, 0.0801, 1.1875]   # Kai c2814b4: +0.5m on the real elongated stand (0.69->1.19)
     base_quat: [0.49989, 0.49988, 0.50055, 0.49968]
     hand_pos: [-0.0306, 0.1078, 0.0]
     hand_euler: [0.0, 0.0, 0.0]
-    neutral_q: [4.612, -1.0, 1.65, 0.0, 0.0, 0.0]   # 6-DoF: forward + own (+Y) side, elbow bent; j6 (roll)=0
+    neutral_q: [3.14, -0.001, 0.305, -0.152, 0.001, 1.571]   # FROZEN official rest pose — see docs/RESTING_POSE.md, DO NOT CHANGE. ragdoll hang + j6 +90° palm-inward
   # YAM joint limits (rad). j1-j5 from the URDF; j6 (wrist roll) = i2rt YAM ±2.0944.
   joint_limits:
     lower: [0.0, -2.879793, -1.396263, -1.570796, -1.570796, -2.0944]
@@ -76,12 +76,12 @@ safety:
   ramp_s: 0.7         # soft-start ramp from neutral on (re)engage
   hold_s: 0.3         # on VR loss while engaged: hold last, then ramp to neutral
   workspace:          # axis-aligned EE target bounds in arm base frame (m)
-    min: [-0.6, -0.2, -0.6]
-    max: [0.6, 0.7, 0.6]
+    min: [-0.6, -0.85, -0.6]   # y-min lowered: arms-down home wrist sits at base-y≈-0.56;
+    max: [0.6, 0.7, 0.6]       # old -0.2 clipped it +0.36m on engage -> arms curled to center
 
 vr:
   transport: fake     # 'fake' (synthetic, no headset) or 'vuer' (real Quest WebXR)
-  calib_seconds: 5.0  # on connect: hold hands out front, palms down, spread — measures your frame
+  calib_seconds: 5.0  # on connect: ARMS DOWN at your sides, palms inward (matches robot rest) — measures your frame from the head pose
   cross_gap: 0.05     # min world-Y gap each hand keeps from center (anti-overlap guard, metres)
   cert_file: cert.pem
   key_file: key.pem

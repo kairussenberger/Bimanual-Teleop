@@ -48,12 +48,18 @@
                    the finger axis -> palm-DOWN, thumb-INWARD at -X home (right arm
                    uses euler 0 to match). -->
               <!-- link6 = WRIST ROLL (j6). The i2rt YAM is 6-DoF; this 6th joint
-                   (replaced/omitted in the 5-DoF URDF) rolls about the wrist→hand
-                   approach axis (= normalized hand offset). The ORCA hand mounts on
-                   link6, and the IK end-effector site lives here. -->
+                   (omitted from the 5-DoF URDF) is a real motor that rolls the hand
+                   on link5's circular flange. axis (0 1 0) = the flange NORMAL in the
+                   link5 frame (mesh-measured by the friend's Orca-Yam-teleop CAD;
+                   supersedes the earlier normalized-hand-offset guess, which was ~25°
+                   off). pos = the flange center in the link5 frame = CAD circle ctr
+                   (-40.5,49.8,0)mm, so the hand rotates TRUE on the flange instead of
+                   orbiting link5's origin. j6=0 = welded reference (flush contact).
+                   range = real i2rt YAM wrist limit ±120° (the friend's ±180° is a
+                   placeholder). The ORCA hand + IK end-effector site live here. -->
               <body name="left_arm_link6" pos="0 0 0" gravcomp="1">
                 <inertial pos="-0.0504 0.1078 0" mass="0.3" diaginertia="3e-4 3e-4 3e-4"/>
-                <joint name="left_arm_j6" axis="-0.4235 0.9059 0" range="-2.0944 2.0944"/>
+                <joint name="left_arm_j6" axis="0 1 0" pos="-0.0405 0.0498 0" range="-2.0944 2.0944"/>
                 <site name="left_ee" pos="-0.0504 0.1078 0" euler="0 3.14159 0" size="0.01" rgba="1 0 0 1" group="1"/>
               </body>
             </body>
