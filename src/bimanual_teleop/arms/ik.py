@@ -9,6 +9,17 @@ TWO-STAGE solve (the key to clean teleop on this arm):
 So the arm never swings to orient the wrist (no jerk), and the hand orientation is
 matched about the correct axes by real IK (no "tilted axis" from a hand-rolled
 pitch/yaw/roll decomposition). 6 DoF = position + full orientation achievable.
+
+JOINT LIMITS & COLLISIONS (spec invariant #5 + Section 8):
+  - Hard limits are baked into the MuJoCo model (jnt_range) AND enforced in the IK
+    via mink.ConfigurationLimit. On top, SOFT limits cap each joint to home ± margin
+    so the arm physically cannot buckle or HYPEREXTEND THE ELBOW (j3) past a
+    human-plausible envelope. See limit_margins() for the live per-joint margin.
+  - Self-collision avoidance: this IK runs on a STANDALONE single-arm model, so it
+    cannot see the other arm/torso — cross-arm collision is mitigated upstream by
+    the anti-cross world-Y guard + workspace box in arm_control. A CollisionAvoidance
+    hook (collision_pairs=) is wired for when a combined/collidable model is used;
+    the vendored arm geoms are visual-only (contype=0), so it stays OFF by default.
 """
 from __future__ import annotations
 
@@ -18,7 +29,9 @@ import numpy as np
 
 
 class ArmIK:
-    def __init__(self, rig: dict, side: str):
+    ELBOW = 2   # index of j3, the elbow joint (soft limit caps its hyperextension)
+
+    def __init__(self, rig: dict, side: str, collision_pairs=None):
         from ..sim.model import arm_xml  # shared model source
         self.side = side
         self.joints = [f"{side}_arm_j{i}" for i in range(1, 7)]   # 6-DoF
@@ -57,6 +70,14 @@ class ArmIK:
             self.model, {**{j: mv for j in arm}, **{j: froze for j in wrist}})]
         self.limits_ori = [clim, mink.VelocityLimit(
             self.model, {**{j: froze for j in arm}, **{j: mv for j in wrist}})]
+        # Optional self-collision avoidance. OFF by default (the standalone arm
+        # model is visual-only); pass geom_pairs to enable on a collidable model,
+        # and it joins BOTH solve stages. See the class docstring for why cross-arm
+        # collision is handled upstream instead.
+        if collision_pairs:
+            ca = mink.CollisionAvoidanceLimit(self.model, collision_pairs)
+            self.limits_pos.append(ca)
+            self.limits_ori.append(ca)
         self.solver = ik.get("solver", "daqp")
         self.damping = float(ik.get("damping", 1e-3))
         self.dt = 1.0 / rig["control"]["arm_hz"]
@@ -79,6 +100,18 @@ class ArmIK:
 
     def fk_wrist(self) -> mink.SE3:
         return self.config.get_transform_frame_to_world(f"{self.side}_wrist", "site")
+
+    def limit_margins(self, q: np.ndarray | None = None) -> np.ndarray:
+        """Per-joint signed distance (rad) to the nearest SOFT limit — for the HUD
+        ('highlight any joint within X% of a limit', spec Section 6) and tests.
+        Positive = inside the soft band; ~0 = at a limit; negative = past it."""
+        q = self.q if q is None else np.asarray(q, dtype=float)
+        return np.minimum(q - self.soft_lo, self.soft_hi - q)
+
+    def within_limits(self, q: np.ndarray | None = None, tol: float = 1e-6) -> bool:
+        """True iff every joint is within its soft limits (no buckle / no elbow
+        hyperextension). Used by the synthetic harness to assert invariant #5."""
+        return bool(np.all(self.limit_margins(q) >= -tol))
 
     def _joint_axis_base(self, name: str) -> np.ndarray:
         jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
