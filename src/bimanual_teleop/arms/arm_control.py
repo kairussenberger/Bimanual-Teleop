@@ -10,7 +10,7 @@ import numpy as np
 
 import mink
 
-from ..hands.retarget_core import OneEuroFilter
+from ..filters import OneEuroFilter
 from ..vr.frames import ClutchMapper, HandSample, euler_to_R, mat_to_se3, quat_to_R, r_base_from_vr
 from .ik import ArmIK
 

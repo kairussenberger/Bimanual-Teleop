@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import numpy as np
 
+# One-Euro now lives in the spec's canonical filters module; re-exported below for
+# the original webcam-ported call sites (rc.OneEuroFilter). Defaults are identical.
+from ..filters import OneEuroFilter  # noqa: F401
+
 # --- landmark layout (MediaPipe-style 21-point hand) ----------------------- #
 FINGERS = ["index", "middle", "ring", "pinky"]
 LM = {  # (base, pip, dip, tip) indices into a 21-point hand
@@ -76,48 +80,6 @@ def clamp_to_rom(angles: dict, roms: dict) -> dict:
             lo, hi = roms[j]
             out[j] = float(np.clip(v, lo, hi))
     return out
-
-
-class OneEuroFilter:
-    """One-Euro adaptive low-pass over a dict of scalar channels (Casiez 2012).
-
-    Smooths hard when steady (kills jitter), barely smooths during fast motion
-    (kills lag). One instance per hand; state persists across frames. Verbatim
-    from webcam_teleop.py.
-    """
-
-    def __init__(self, mincutoff: float = ONE_EURO_MINCUTOFF,
-                 beta: float = ONE_EURO_BETA, dcutoff: float = 1.0):
-        self.mincutoff, self.beta, self.dcutoff = mincutoff, beta, dcutoff
-        self._x_prev: dict = {}
-        self._dx_prev: dict = {}
-        self._t_prev: float | None = None
-
-    @staticmethod
-    def _alpha(cutoff: float, dt: float) -> float:
-        tau = 1.0 / (2.0 * np.pi * cutoff)
-        return 1.0 / (1.0 + tau / dt)
-
-    def __call__(self, values: dict, t: float) -> dict:
-        if self._t_prev is None:
-            self._t_prev = t
-            self._x_prev = dict(values)
-            self._dx_prev = {k: 0.0 for k in values}
-            return dict(values)
-        dt = max(t - self._t_prev, 1e-3)
-        self._t_prev = t
-        out = {}
-        for k, x in values.items():
-            x_prev = self._x_prev.get(k, x)
-            dx = (x - x_prev) / dt
-            a_d = self._alpha(self.dcutoff, dt)
-            dx_hat = a_d * dx + (1 - a_d) * self._dx_prev.get(k, 0.0)
-            cutoff = self.mincutoff + self.beta * abs(dx_hat)
-            a = self._alpha(cutoff, dt)
-            x_hat = a * x + (1 - a) * x_prev
-            self._x_prev[k], self._dx_prev[k] = x_hat, dx_hat
-            out[k] = x_hat
-        return out
 
 
 def landmarks_to_joint_angles(pts: np.ndarray, neutral: dict, *, mirror: bool = True,
