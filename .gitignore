@@ -11,3 +11,8 @@ key.pem
 *.log
 recordings/
 .vr_url
+# Generated artifacts (synthetic harness GIFs, telemetry dumps, etc.)
+out/
+*.gif
+*.parquet
+.pytest_cache/
