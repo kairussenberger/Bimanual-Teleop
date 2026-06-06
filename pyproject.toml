@@ -19,9 +19,18 @@ dependencies = [
 [project.optional-dependencies]
 # VR ingest (Quest 3 over WebXR). Heavier/churny dep, isolated so the core sim stays lean.
 vr = ["vuer>=0.0.32"]
+# Telemetry backbone (spec Section 6): live 3D-transform + scalar-timeseries
+# dashboard. Optional so the core sim stays lean and headless CI needs nothing
+# extra; viz/rerun_log.py degrades to a no-op when it is absent.
+telemetry = ["rerun-sdk>=0.20"]
 # Real YAM arms are Linux-only (SocketCAN). Install the i2rt SDK manually on the Linux host:
 #   git clone https://github.com/i2rt-robotics/i2rt && uv pip install -e i2rt   (Ubuntu, Python 3.11)
 # hardware = ["i2rt"]   # not on PyPI; see README "Hardware day".
+
+# Dev/test tooling. uv installs dependency-groups into the `uv run` env by default,
+# so the DoD command `uv run pytest` works without extra flags.
+[dependency-groups]
+dev = ["pytest>=8"]
 
 [tool.uv]
 package = true
