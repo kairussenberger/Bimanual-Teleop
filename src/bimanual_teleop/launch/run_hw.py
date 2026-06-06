@@ -44,6 +44,7 @@ def main() -> int:
     supervisor = Supervisor(rig, GestureClutch())
     src = make_source(rig)
     src.start()
+    push_calib = hasattr(src, "set_calib")   # in-headset calibration countdown (Vuer)
 
     period = 1.0 / hz
     try:
@@ -51,6 +52,8 @@ def main() -> int:
             t = time.monotonic()   # shared clock with source stamps + supervisor staleness
             frame = src.latest()
             engine.tick(frame, supervisor.update(frame, t), t)
+            if push_calib:
+                src.set_calib(engine.calib_status)
             dt = period - (time.monotonic() - t)
             if dt > 0:
                 time.sleep(dt)

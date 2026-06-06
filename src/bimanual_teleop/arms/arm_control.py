@@ -11,7 +11,7 @@ import numpy as np
 import mink
 
 from ..hands.retarget_core import OneEuroFilter
-from ..vr.frames import ClutchMapper, HandSample, mat_to_se3, quat_to_R, r_base_from_vr
+from ..vr.frames import ClutchMapper, HandSample, euler_to_R, mat_to_se3, quat_to_R, r_base_from_vr
 from .ik import ArmIK
 
 
@@ -42,15 +42,37 @@ class ArmController:
         self._filt_params = dict(mincutoff=4.0, beta=1.0)
         self.pos_filt = OneEuroFilter(**self._filt_params)
         self._was_engaged = False
+        self.cmd_R = None   # last commanded EE orientation (base frame) — for the on-screen viz
 
     def set_ref_frame(self, R: np.ndarray) -> None:
         # Retained for API compatibility; orientation is handled by the two-stage
         # IK against the calibrated mapper target, not a hand-rolled decomposition.
         pass
 
+    def set_ori_calib(self, wrist_ref: np.ndarray | None, op_axes: np.ndarray | None) -> None:
+        """Build the hand-local→EE-local orientation correspondence P from the
+        reference stance, so a wrist TWIST drives the EE roll joint (j6) instead of
+        arcing the forearm (j4). op_axes = operator [right|up|forward] in WebXR;
+        wrist_ref = the WebXR wrist rotation at the reference stance."""
+        if wrist_ref is None or op_axes is None:
+            return
+        L = np.asarray(wrist_ref, float).T @ np.asarray(op_axes, float)  # operator axes in hand-local
+        E_loc = self.ik.ee_semantic_frame_local()                        # EE axes in EE-local
+        # Optional per-side correspondence nudge (radians, intrinsic XYZ in hand-local).
+        # Stays a proper rotation, so it can re-align an axis but never re-mirror. Use
+        # e.g. [0, π, 0] if wrist roll still feels reversed for a side after calibration.
+        tweak = (self.rig.get("mapping", {}).get("ori_tweak_euler", {}) or {}).get(self.side, (0.0, 0.0, 0.0))
+        self.mapper.set_P(E_loc @ L.T @ euler_to_R(tweak))               # hand-local → EE-local
+
     def update(self, hand: HandSample | None, engaged: bool, t: float) -> np.ndarray:
         active = bool(engaged and hand is not None and hand.tracked)
-        if active and not self._was_engaged:                 # clutch rising edge
+        # (Re)anchor on the clutch rising edge OR whenever the mapper has dropped its
+        # anchor while still active — set_R()/set_P() call release() (e.g. live frame
+        # retuning in mapping_studio), and without re-engaging here the next target()
+        # would assert on a null anchor. engage() makes the target equal the current
+        # EE pose, so re-anchoring is continuous (only the displacement-since-clutch
+        # resets to zero, which is the desired behaviour after a retune).
+        if active and (not self._was_engaged or not self.mapper.engaged):
             # anchor POSITION to the wrist site, ORIENTATION to the hand
             anchor = mink.SE3.from_rotation_and_translation(
                 self.ik.fk_ee().rotation(), self.ik.fk_wrist().translation())
@@ -69,5 +91,8 @@ class ArmController:
             pw[1] = min(pw[1], self.y_bound) if self.side == "left" else max(pw[1], self.y_bound)
             pb = self.base_R.T @ (pw - self.base_pos)                    # anti-cross clamp, back to base
             target = mink.SE3.from_rotation_and_translation(target.rotation(), pb)
+            self.cmd_R = target.rotation().as_matrix()   # commanded orientation (base frame), for viz
             self.ik.solve(target, iters=self.iters)   # two-stage: position(j1-3) then orientation(j4-6)
+        else:
+            self.cmd_R = None
         return self.ik.q

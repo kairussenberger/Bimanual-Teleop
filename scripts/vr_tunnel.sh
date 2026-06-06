@@ -11,7 +11,9 @@ cd "$(dirname "$0")/.."
 command -v cloudflared >/dev/null || { echo "cloudflared not found — run: brew install cloudflared"; exit 1; }
 
 echo "Starting tunnel... (the link appears in a few seconds)"
-cloudflared tunnel --url http://localhost:8012 2>&1 | while IFS= read -r line; do
+# --protocol http2 + --edge-ip-version 4: eduroam throttles QUIC (UDP 7844), which
+# causes endless "context canceled / control stream failure" drops. TCP/HTTP2 is stable.
+cloudflared tunnel --url http://localhost:8012 --protocol http2 --edge-ip-version 4 2>&1 | while IFS= read -r line; do
   url=$(printf '%s' "$line" | grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' || true)
   if [ -n "${url:-}" ]; then
     printf '%s\n' "$url" > .vr_url

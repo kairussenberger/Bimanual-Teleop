@@ -44,6 +44,25 @@ def _pinch_from_landmarks(lm) -> float:
     return float(np.clip((0.6 - d / scale) / (0.6 - 0.2), 0.0, 1.0))
 
 
+# Fixed floating-panel positions in the WebXR floor frame (+Y up, −Z forward):
+# a triad for each hand at face height, ~0.6 m in front. YOUR frame on top, the
+# ROBOT's frame just below it, so you compare orientation per side. The hand poses
+# are wrist-RELATIVE (wrist position reads ~0 = on the floor), so pinning the viz
+# at a fixed spot is the only way it stays visible once you enter immersive VR.
+_VIZ_POS = {
+    "op_left":  [-0.30, 1.45, -0.6], "rb_left":  [-0.30, 1.15, -0.6],
+    "op_right": [0.30, 1.45, -0.6],  "rb_right": [0.30, 1.15, -0.6],
+}
+
+
+def _coords_mat(pos, R) -> list:
+    """Col-major 4x4 (Vuer/WebXR convention) from a position + 3x3 rotation."""
+    M = np.eye(4)
+    M[:3, :3] = R
+    M[:3, 3] = pos
+    return list(M.reshape(-1, order="F"))
+
+
 class VuerVRSource(VRSource):
     def __init__(self, rig: dict, debug: bool = False):
         v = rig.get("vr", {})
@@ -58,14 +77,22 @@ class VuerVRSource(VRSource):
         self._lock = threading.Lock()
         self._frame = VRFrame(hands={s: HandSample() for s in SIDES})
         self._robot_viz: dict[str, list] = {}   # side -> 16-float col-major matrix (robot hand frame, WebXR)
+        self._calib: dict | None = None          # in-headset calibration banner state
         self._thread: threading.Thread | None = None
         self._app = None
 
-    def set_robot_frame(self, side: str, mat16) -> None:
-        """Push the robot's hand frame (4x4 in the WebXR/headset frame) for the
-        in-headset visualization. Called from the control loop."""
+    def set_robot_frame(self, side: str, R3x3) -> None:
+        """Push the robot's hand ORIENTATION (3x3, in the WebXR/headset frame) for
+        the in-headset viz. Position is fixed (floating panel), so only orientation
+        matters for the comparison. Called from the control loop."""
         with self._lock:
-            self._robot_viz[side] = list(np.asarray(mat16, dtype=float).reshape(-1))
+            self._robot_viz[side] = np.asarray(R3x3, dtype=float).reshape(3, 3)
+
+    def set_calib(self, status) -> None:
+        """Push the calibration banner state for the in-headset countdown (engine
+        publishes it each tick as engine.calib_status). None = hide the banner."""
+        with self._lock:
+            self._calib = dict(status) if status else None
 
     def latest(self) -> VRFrame | None:
         # Return an atomic snapshot so a control tick can't read a half-updated
@@ -101,14 +128,46 @@ class VuerVRSource(VRSource):
                 hands={**self._frame.hands, side: HandSample(
                     tracked=True, wrist=wrist, landmarks=landmarks, pinch=pinch)})
 
-    def _op_frame_mat(self, side: str):
-        """Operator wrist pose (the EXACT WebXR frame the orientation mapping
-        consumes) as a col-major 4x4, for the in-headset viz."""
+    def _op_rotation(self, side: str):
+        """Operator hand ORIENTATION (3x3, WebXR) the mapping consumes, or None."""
         with self._lock:
             h = self._frame.hands.get(side)
         if h is None or not h.tracked:
             return None
-        return list(np.asarray(h.wrist, float).reshape(4, 4).reshape(-1, order="F"))
+        return np.asarray(h.wrist, float).reshape(4, 4)[:3, :3]
+
+    def _calib_banner(self):
+        """Build the in-headset calibration banner (a Billboard of Text lines) from
+        the latest status, or an empty Billboard to clear it. Big message + a huge
+        countdown + an ASCII progress bar + per-hand tracked flags, always facing you."""
+        from vuer.schemas import Billboard, Text
+        with self._lock:
+            cal = dict(self._calib) if self._calib else None
+        if not cal:
+            return Billboard(key="calib", position=[0.0, 1.5, -1.0])
+        phase = cal.get("phase", "wait")
+        prog = float(cal.get("progress", 0.0))
+        rem = float(cal.get("remaining", 0.0))
+        if phase == "done":
+            col, big, num = "#a6e3a1", str(cal.get("msg", "CALIBRATED")), "OK"
+        elif phase == "hold":
+            col, big, num = "#f9e2af", "HOLD STILL — ARMS AT YOUR SIDES", f"{rem:0.0f}"
+        else:
+            col, big, num = "#89b4fa", str(cal.get("msg", "DROP YOUR ARMS TO YOUR SIDES")), ""
+        n = int(round(prog * 12))
+        bar = "[" + "#" * n + "-" * (12 - n) + "]"
+        lt = "OK" if cal.get("left") else ".."
+        rt = "OK" if cal.get("right") else ".."
+        return Billboard(
+            Text(big, key="cal_big", position=[0.0, 0.20, 0.0], fontSize=0.062,
+                 color=col, anchorX="center", anchorY="middle"),
+            Text(num, key="cal_num", position=[0.0, 0.02, 0.0], fontSize=0.22,
+                 color=col, anchorX="center", anchorY="middle"),
+            Text(bar, key="cal_bar", position=[0.0, -0.13, 0.0], fontSize=0.05,
+                 color=col, anchorX="center", anchorY="middle", font="monospace"),
+            Text(f"hands    L {lt}     R {rt}", key="cal_hands", position=[0.0, -0.22, 0.0],
+                 fontSize=0.04, color="#cdd6f4", anchorX="center", anchorY="middle"),
+            key="calib", position=[0.0, 1.5, -1.0])
 
     def _serve(self) -> None:  # pragma: no cover - needs vuer + a headset
         from vuer import Vuer
@@ -149,16 +208,24 @@ class VuerVRSource(VRSource):
             tick = 0
             while True:
                 await asyncio.sleep(1.0 / 30)
-                # In-headset frame visualization: a BIG bright triad on each wrist
-                # = YOUR hand frame; a smaller triad = the ROBOT's hand frame.
-                # Compare them to see the mapping. (X=red, Y=green, Z=blue.)
+                # In-headset frame viz: four triads FLOATING IN FRONT of you at
+                # face height (the hand poses are wrist-relative, so a triad pinned
+                # to the wrist sits on the floor and vanishes in VR). Per side, YOUR
+                # hand frame is the upper triad, the ROBOT's hand frame the lower —
+                # compare their orientation to read the mapping. (X=red Y=green Z=blue.)
                 for side in SIDES:
-                    op = self._op_frame_mat(side)
+                    op = self._op_rotation(side)
                     if op is not None:
-                        session.upsert @ CoordsMarker(key=f"op_{side}", matrix=op, scale=0.12, headScale=1.5)
-                    rb = self._robot_viz.get(side)
+                        session.upsert @ CoordsMarker(
+                            key=f"op_{side}", matrix=_coords_mat(_VIZ_POS[f"op_{side}"], op),
+                            scale=0.13, headScale=1.6)
+                    with self._lock:
+                        rb = self._robot_viz.get(side)
                     if rb is not None:
-                        session.upsert @ CoordsMarker(key=f"rb_{side}", matrix=rb, scale=0.08, headScale=1.0)
+                        session.upsert @ CoordsMarker(
+                            key=f"rb_{side}", matrix=_coords_mat(_VIZ_POS[f"rb_{side}"], rb),
+                            scale=0.13, headScale=1.6)
+                session.upsert @ self._calib_banner()   # in-headset calibration countdown
                 tick += 1
                 if self.debug and tick % 60 == 0:
                     d = self._dbg

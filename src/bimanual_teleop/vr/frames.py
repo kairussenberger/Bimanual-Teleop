@@ -100,11 +100,23 @@ class ClutchMapper:
         self.anchor_ctrl: mink.SE3 | None = None
         self.anchor_ee: mink.SE3 | None = None
         self._R_off: np.ndarray | None = None   # orientation anchor so engage is continuous
+        # Orientation correspondence (hand-LOCAL → EE-LOCAL). Calibration sets this so
+        # a wrist twist maps to the EE roll axis (j6). Identity = no remap.
+        self.P = np.eye(3)
+        # Debug: when True, the EE holds the anchor orientation and ONLY position
+        # maps — lets you verify the 3 translation axes in isolation before adding
+        # orientation. Set via the --pos-only studio flag.
+        self.freeze_ori = False
 
     def set_R(self, R: np.ndarray) -> None:
         """Replace the headset→base rotation (e.g. after calibration)."""
         self.R = np.asarray(R, dtype=float).reshape(3, 3)
         self.release()   # force a fresh anchor on next engage
+
+    def set_P(self, P: np.ndarray) -> None:
+        """Replace the hand-local→EE-local orientation correspondence (calibration)."""
+        self.P = np.asarray(P, dtype=float).reshape(3, 3)
+        self.release()
 
     @property
     def engaged(self) -> bool:
@@ -128,9 +140,14 @@ class ClutchMapper:
         assert self.anchor_ctrl is not None and self.anchor_ee is not None
         dp_vr = ctrl.translation() - self.anchor_ctrl.translation()
         p = self.anchor_ee.translation() + self.scale * (self.R @ dp_vr)
-        if self.abs_orientation:
-            Rt = self._R_off @ (self.R @ ctrl.rotation().as_matrix())   # absolute-aligned, no engage snap
-        else:
-            dR = self.anchor_ctrl.rotation().inverse().as_matrix() @ ctrl.rotation().as_matrix()
-            Rt = self.anchor_ee.rotation().as_matrix() @ (self.R @ dR @ self.R.T)
+        if self.freeze_ori:                       # position-only debug: hold rest orientation
+            return mink.SE3.from_rotation_and_translation(self.anchor_ee.rotation(), p)
+        # Orientation: the operator's wrist rotation SINCE engage, measured in the
+        # hand-local frame, re-expressed into the EE frame via the calibrated
+        # correspondence P, then applied to the EE anchor. Continuous at engage
+        # (dR=I ⇒ Rt=anchor_ee), and a twist about the hand's pointing axis maps to
+        # the EE roll axis (j6) because P aligns the two frames. The old "absolute"
+        # form let R cancel (RᵀR=I), so calibration couldn't steer orientation at all.
+        dR = self.anchor_ctrl.rotation().inverse().as_matrix() @ ctrl.rotation().as_matrix()
+        Rt = self.anchor_ee.rotation().as_matrix() @ (self.P @ dR @ self.P.T)
         return mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(Rt), p)

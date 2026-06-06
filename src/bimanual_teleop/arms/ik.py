@@ -80,6 +80,31 @@ class ArmIK:
     def fk_wrist(self) -> mink.SE3:
         return self.config.get_transform_frame_to_world(f"{self.side}_wrist", "site")
 
+    def _joint_axis_base(self, name: str) -> np.ndarray:
+        jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        return self.config.data.xaxis[jid].copy()   # joint axis in the (base) world frame
+
+    def ee_semantic_frame_local(self) -> np.ndarray:
+        """The EE site's own axes, expressed in EE-LOCAL coords, labelled by what the
+        operator's wrist does: forward = j6 ROLL axis, right = j5 PITCH axis, up =
+        their cross. Calibration aligns the operator's hand frame onto THIS, so a
+        wrist twist drives j6 (not a forearm arc on j4). Columns = [right, up, forward]."""
+        self.config.update(self.q0)
+        mujoco.mj_forward(self.model, self.config.data)
+        f = self._joint_axis_base(self.joints[5])              # j6 = roll/approach axis
+        r = self._joint_axis_base(self.joints[4])              # j5 = pitch axis
+        f = f / (np.linalg.norm(f) + 1e-12)
+        r = r - (r @ f) * f
+        r = r / (np.linalg.norm(r) + 1e-12)                    # orthonormalize against forward
+        # u = r × f (NOT f × r): the operator/world frames (calibrate.W_AXES,
+        # head_op_axes) are built LEFT-handed, so this EE frame must use the SAME
+        # handedness or the calibrated correspondence P = E_loc @ Lᵀ comes out a
+        # REFLECTION (det −1) and the wrist twist maps mirrored — the flipped-wrist bug.
+        u = np.cross(r, f)
+        ee_R = self.fk_ee().rotation().as_matrix()             # EE → base
+        E_base = np.column_stack([r, u, f])
+        return ee_R.T @ E_base                                 # → EE-local
+
     def solve(self, target: mink.SE3, iters: int | None = None) -> np.ndarray:
         iters = self.iters if iters is None else iters
         self.pos_task.set_target(target)
@@ -89,7 +114,10 @@ class ArmIK:
                               self.solver, damping=self.damping, limits=self.limits_pos)
             self.config.integrate_inplace(v, self.dt)
         for _ in range(iters):   # stage 2: orientation → wrist joints j4-j6
-            v = mink.solve_ik(self.config, [self.ori_task], self.dt,
+            # posture (weak) pulls the free wrist joints toward home, so a pure ROLL
+            # is taken by j6 (the hand-axis roll joint) instead of swinging j4 — j4
+            # arcs the hand, which is the "arm jerks upward on wrist twist" symptom.
+            v = mink.solve_ik(self.config, [self.ori_task, self.posture], self.dt,
                               self.solver, damping=self.damping, limits=self.limits_ori)
             self.config.integrate_inplace(v, self.dt)
         return self.config.q.copy()

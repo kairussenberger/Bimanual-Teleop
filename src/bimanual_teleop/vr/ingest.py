@@ -98,4 +98,7 @@ def make_source(rig: dict) -> VRSource:
     if transport == "vuer":
         from .vuer_source import VuerVRSource
         return VuerVRSource(rig)
+    if transport == "orbit":
+        from .orbit_source import OrbitVRSource
+        return OrbitVRSource(rig)
     raise ValueError(f"unknown vr.transport: {transport!r}")
