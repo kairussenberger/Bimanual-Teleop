@@ -66,6 +66,25 @@ def test_replay_none_landmarks_survive_roundtrip(tmp_path):
     assert got.hands["left"].tracked and not got.hands["right"].tracked
 
 
+def test_replay_preserves_wrist_rotation(tmp_path):
+    """A non-identity wrist ORIENTATION must survive the round-trip (not just the
+    translation) — orientation is the whole point of the teleop bug."""
+    from bimanual_teleop.vr.frames import HandSample, VRFrame, euler_to_R
+    R = euler_to_R([0.4, -0.7, 1.2])
+    wrist = np.eye(4)
+    wrist[:3, :3] = R
+    wrist[:3, 3] = [0.1, -0.2, 0.3]
+    rec = SessionRecorder()
+    rec.add(VRFrame(stamp=0.0, head=np.eye(4),
+                    hands={"left": HandSample(tracked=True, wrist=wrist, landmarks=None),
+                           "right": HandSample(tracked=True, wrist=np.eye(4), landmarks=None)}),
+            {"left": True, "right": True}, 0.0)
+    p = tmp_path / "rot.npz"
+    rec.save(str(p))
+    got = ReplaySource(str(p)).frame_at(0.0).hands["left"].wrist
+    assert np.allclose(got, wrist, atol=1e-9)
+
+
 def test_replay_loop_wraps():
     rs = ReplaySource.from_recorder(_record(n=10, hz=10.0), loop=True)
     assert abs(rs.duration - 0.9) < 1e-9

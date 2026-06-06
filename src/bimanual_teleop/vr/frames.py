@@ -174,6 +174,11 @@ class ClutchMapper:
                  abs_orientation: bool = True):
         self.R = np.asarray(R_base_from_vr, dtype=float).reshape(3, 3)
         self.scale = float(pos_scale)
+        # NOTE: target() is ALWAYS relative (invariant #1: never absolute). This flag
+        # and the `_R_off` latched in engage() are kept for API/back-compat but are
+        # currently INERT — orientation maps through the calibrated correspondence P.
+        # Don't trust this flag to change behaviour without wiring it into target() +
+        # a test that asserts the two modes differ for a post-engage twist.
         self.abs_orientation = bool(abs_orientation)
         self.anchor_ctrl: mink.SE3 | None = None
         self.anchor_ee: mink.SE3 | None = None
@@ -205,7 +210,8 @@ class ClutchMapper:
         target equals the current EE pose at the engage instant (no jump)."""
         self.anchor_ctrl = ctrl
         self.anchor_ee = ee
-        # abs mode: Rt = R_off @ (R @ ctrl.R); choose R_off so Rt == anchor_ee.R at engage.
+        # _R_off is latched for a would-be absolute mode but is currently INERT
+        # (target() never reads it — see the __init__ note; the mapping is relative).
         self._R_off = ee.rotation().as_matrix() @ (self.R @ ctrl.rotation().as_matrix()).T
 
     def release(self) -> None:

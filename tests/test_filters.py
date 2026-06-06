@@ -40,12 +40,15 @@ def test_step_response_no_overshoot_and_converges():
     f = OneEuroFilter(mincutoff=1.0, beta=0.0)
     for i in range(50):
         f({"x": 0.0}, i * DT)
-    prev = 0.0
+    prev, first = 0.0, None
     for i in range(50, 400):
         y = f({"x": 1.0}, i * DT)["x"]
+        if first is None:
+            first = y
         assert 0.0 <= y <= 1.0          # bounded by [old, new] -> no overshoot
         assert y >= prev - 1e-12        # monotonic toward target
         prev = y
+    assert first < 0.5                  # the step IS smoothed (a passthrough would be 1.0)
     assert prev > 0.99                  # eventually converges
 
 

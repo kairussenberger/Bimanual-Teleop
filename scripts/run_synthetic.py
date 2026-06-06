@@ -64,7 +64,10 @@ YAW_AMP = 0.40        # rad about the wrist yaw axis
 # PASS thresholds (after the ease-in settles).
 TOL_POS_CM = 2.0      # max wrist position error
 TOL_ORI_DEG = 5.0     # max EE orientation error
-TOL_FLIP_RAD = 0.5    # max single-tick joint jump (a flip would be ~pi)
+# Max single-tick joint jump that still counts as continuous. A real flip is ~pi;
+# the legitimate per-tick ceiling is iters*max_vel*dt (= 0.6 rad at the defaults), so
+# 1.0 sits safely above legitimate motion and well below a flip.
+TOL_FLIP_RAD = 1.0
 WARMUP_S = 1.0        # ignore the ease-in transient when scoring error
 
 
@@ -166,7 +169,9 @@ class TrajResult:
 
 def run(args) -> int:
     rig = load_rig()
-    hz = args.hz
+    # Match the loop rate to the IK's integration dt (rig control.arm_hz) so the
+    # measured per-tick joint velocity is comparable to the enforced velocity limit.
+    hz = float(args.hz) if args.hz else float(rig["control"]["arm_hz"])
     dt = 1.0 / hz
     n = int(args.seconds * hz)
     max_vel_limit = float(rig["ik"]["max_vel"])
@@ -315,7 +320,7 @@ def run_view(args) -> int:
 
     import mujoco.viewer
     rig = load_rig()
-    hz = args.hz
+    hz = float(args.hz) if args.hz else float(rig["control"]["arm_hz"])
     world = SimWorld(rig)
     arms = {s: SyntheticArm(rig, s) for s in SIDES}
     trajectories = [t for t in make_trajectories() if not args.traj or t.name in args.traj]
@@ -359,7 +364,8 @@ def main() -> int:
                     help="output GIF path (default out/run_synthetic.gif)")
     ap.add_argument("--no-gif", action="store_true", help="skip rendering (fastest verify)")
     ap.add_argument("--csv", metavar="PATH", default=None, help="dump per-tick telemetry CSV")
-    ap.add_argument("--hz", type=float, default=120.0)
+    ap.add_argument("--hz", type=float, default=None,
+                    help="control loop rate (default: rig control.arm_hz, matching the IK dt)")
     ap.add_argument("--seconds", type=float, default=5.0)
     ap.add_argument("--fps", type=float, default=15.0, help="GIF frame rate")
     ap.add_argument("--width", type=int, default=720)

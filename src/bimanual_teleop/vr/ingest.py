@@ -103,5 +103,8 @@ def make_source(rig: dict) -> VRSource:
         return OrbitVRSource(rig)
     if transport == "replay":
         from .replay import ReplaySource
-        return ReplaySource(rig["vr"]["replay_path"], loop=rig["vr"].get("replay_loop", False))
+        path = rig.get("vr", {}).get("replay_path")
+        if not path:
+            raise ValueError("vr.transport='replay' requires vr.replay_path in the rig config")
+        return ReplaySource(path, loop=rig["vr"].get("replay_loop", False))
     raise ValueError(f"unknown vr.transport: {transport!r}")

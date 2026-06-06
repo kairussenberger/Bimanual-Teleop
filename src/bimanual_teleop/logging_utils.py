@@ -97,9 +97,15 @@ class TelemetryRing:
         return path
 
 
+def _fmt(x: Any) -> str:
+    return f"{x:.6g}" if isinstance(x, float) else str(x)
+
+
 def _csv_val(v: Any) -> Any:
-    if isinstance(v, (list, tuple)):
-        return ";".join(f"{x:.6g}" if isinstance(x, float) else str(x) for x in v)
-    if hasattr(v, "tolist"):                # numpy array/scalar
-        return ";".join(map(str, v.tolist())) if getattr(v, "ndim", 0) else v.item()
+    if hasattr(v, "tolist"):                # numpy array/scalar -> python first
+        if getattr(v, "ndim", 0) == 0:
+            return _fmt(v.item())
+        v = v.tolist()
+    if isinstance(v, (list, tuple)):        # one formatter for every sequence
+        return ";".join(_fmt(x) for x in v)
     return v

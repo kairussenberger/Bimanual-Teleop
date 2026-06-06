@@ -11,7 +11,6 @@ clean wrist roll into a pitch+yaw mush, so this is the test that pins R_align.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from bimanual_teleop.vr import frames as F
 
@@ -117,6 +116,9 @@ def test_change_of_basis_PLUS_90_ROLL_about_forward():
     # explicit "nothing else": components orthogonal to forward (pitch/yaw) are ~0
     perp = v - (v @ robot_forward) * robot_forward
     assert np.linalg.norm(perp) < 1e-9
+    # strongest form: the WHOLE matrix equals a hand-built +90° roll about world -X,
+    # so the test fails if the conjugation is dropped/wrong (not just the axis).
+    assert np.allclose(dR_robot, _axis_angle_R([-1, 0, 0], theta), atol=1e-9)
 
 
 def test_quaternion_change_of_basis_matches_matrix():
@@ -127,6 +129,10 @@ def test_quaternion_change_of_basis_matches_matrix():
     dq_robot = F.change_basis_quat(q_align, dq)
     assert np.allclose(F.quat_to_R(dq_robot),
                        F.conjugate_rotation(F.R_ALIGN, F.quat_to_R(dq)), atol=1e-9)
+    # ground truth (not impl-vs-impl): the conjugated axis is R_ALIGN @ (0,0,-1),
+    # the angle is preserved, so the result is that exact axis-angle rotation.
+    gt = _axis_angle_R(F.R_ALIGN @ [0, 0, -1], np.pi / 2)
+    assert np.allclose(F.quat_to_R(dq_robot), gt, atol=1e-9)
 
 
 # --- quaternion helper correctness ----------------------------------------- #

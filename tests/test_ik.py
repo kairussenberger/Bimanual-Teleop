@@ -71,16 +71,25 @@ def test_pure_roll_is_realised_on_j6():
     q0 = ik.q.copy()
     wrist_p = ik.fk_wrist().translation()
     ee_R0 = ik.fk_ee().rotation().as_matrix()
-    axis = ik._joint_axis_base(ik.joints[5])               # j6 (tool/roll) axis in base
-    theta = 0.6                                            # ~34°, inside the soft cap
-    tgt_R = _axis_angle_R(axis, theta) @ ee_R0             # base-frame roll about the tool axis
+    # Build the roll about the EE SITE's OWN axis (from FK), not the j6 joint axis,
+    # so the test isn't circular — then independently assert that EE tool axis IS the
+    # j6 axis (the physical reason a tool-axis roll lands on j6).
+    j6_axis = ik._joint_axis_base(ik.joints[5])
+    j6_axis = j6_axis / np.linalg.norm(j6_axis)
+    align = np.abs(ee_R0.T @ j6_axis)          # which EE-local axis coincides with j6
+    tool_col = int(np.argmax(align))
+    assert align[tool_col] > 0.99, "EE site must have a local axis equal to the j6/tool axis"
+    ee_tool = ee_R0[:, tool_col]               # the tool/roll axis, from the EE frame
+
+    theta = 0.6                                # ~34°, inside the j6 soft cap
+    tgt_R = _axis_angle_R(ee_tool, theta) @ ee_R0
     target = mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(tgt_R), wrist_p)
     for _ in range(200):
         ik.solve(target)
 
     dq = ik.q - q0
-    assert _ori_err_deg(ik.fk_ee().rotation().as_matrix(), tgt_R) < 2.0   # orientation reached
-    assert abs(dq[5]) > 0.8 * theta            # j6 carries the roll
-    assert abs(dq[3]) < 0.12 and abs(dq[4]) < 0.12   # wrist pitch/yaw barely move
-    assert np.all(np.abs(dq[:3]) < 0.1)        # the ARM (j1-j3) does not arc to roll
+    assert _ori_err_deg(ik.fk_ee().rotation().as_matrix(), tgt_R) < 1.0   # orientation reached
+    assert abs(dq[5]) > 0.97 * theta           # j6 carries (essentially all of) the roll
+    assert abs(dq[3]) < 0.02 and abs(dq[4]) < 0.02   # wrist pitch/yaw barely move
+    assert np.all(np.abs(dq[:3]) < 0.02)       # the ARM (j1-j3) does not arc to roll
     assert ik.within_limits()
