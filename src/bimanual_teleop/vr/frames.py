@@ -42,6 +42,78 @@ def quat_to_R(q) -> np.ndarray:
     ])
 
 
+# --- quaternion algebra (w, x, y, z convention, matching quat_to_R) --------- #
+def quat_mul(a, b) -> np.ndarray:
+    """Hamilton product a ⊗ b of two (w, x, y, z) quaternions."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return np.array([
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ])
+
+
+def quat_conj(q) -> np.ndarray:
+    w, x, y, z = q
+    return np.array([w, -x, -y, -z])
+
+
+def quat_inv(q) -> np.ndarray:
+    q = np.asarray(q, dtype=float)
+    return quat_conj(q) / float(q @ q)
+
+
+def quat_from_axis_angle(axis, angle: float) -> np.ndarray:
+    a = np.asarray(axis, dtype=float)
+    n = np.linalg.norm(a)
+    if n < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    h = 0.5 * float(angle)
+    return np.array([np.cos(h), *(np.sin(h) * (a / n))])
+
+
+def R_to_quat(R: np.ndarray) -> np.ndarray:
+    """Rotation matrix → unit (w, x, y, z) quaternion (Shepperd's method, numerically
+    stable). Inverse of quat_to_R up to global sign (q and −q are the same rotation)."""
+    R = np.asarray(R, dtype=float).reshape(3, 3)
+    t = np.trace(R)
+    if t > 0.0:
+        s = np.sqrt(t + 1.0) * 2.0
+        q = [0.25 * s, (R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s]
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2.0
+        q = [(R[2, 1] - R[1, 2]) / s, 0.25 * s, (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s]
+    elif R[1, 1] > R[2, 2]:
+        s = np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2.0
+        q = [(R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s, 0.25 * s, (R[1, 2] + R[2, 1]) / s]
+    else:
+        s = np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2.0
+        q = [(R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s, (R[1, 2] + R[2, 1]) / s, 0.25 * s]
+    q = np.array(q)
+    return q / np.linalg.norm(q)
+
+
+def conjugate_rotation(R_basis: np.ndarray, R_delta: np.ndarray) -> np.ndarray:
+    """Change-of-basis for a ROTATION (spec Section 3): re-express R_delta — a
+    rotation given in frame A — in the frame that R_basis (A→B) maps into:
+
+        R_delta_in_B = R_basis · R_delta · R_basisᵀ
+
+    The angle is preserved; the axis transforms by R_basis. This is the matrix form
+    of the quaternion conjugation q_align · dq · q_align⁻¹ — the step people forget,
+    which is exactly what scrambles a pure wrist roll into pitch+yaw if skipped."""
+    R_basis = np.asarray(R_basis, dtype=float).reshape(3, 3)
+    R_delta = np.asarray(R_delta, dtype=float).reshape(3, 3)
+    return R_basis @ R_delta @ R_basis.T
+
+
+def change_basis_quat(q_basis, dq) -> np.ndarray:
+    """Quaternion form of conjugate_rotation: q_basis ⊗ dq ⊗ q_basis⁻¹."""
+    return quat_mul(quat_mul(q_basis, dq), quat_inv(q_basis))
+
+
 # WebXR reference frame (x=right, y=up, -z=forward) → robot WORLD frame
 # (x, y, z; the robot faces world -X). Columns = where webxr +x,+y,+z land in world:
 # webxr +z (back) → world +X  (so forward -z → -X = robot forward),
@@ -49,6 +121,12 @@ def quat_to_R(q) -> np.ndarray:
 WEBXR_TO_WORLD = np.array([[0.0, 0.0, 1.0],
                            [1.0, 0.0, 0.0],
                            [0.0, 1.0, 0.0]])
+
+# The spec (Section 2/3) names the static OpenXR→robot basis change `R_align`.
+# In this repo that is exactly WEBXR_TO_WORLD (headset world → robot world); the
+# per-arm IK-base rotation adds the arm's base_quat on top (see r_base_from_vr).
+# Exposed under the spec's name so call-sites and tests can speak the same language.
+R_ALIGN = WEBXR_TO_WORLD
 
 
 def r_base_from_vr(base_quat, tweak_euler=(0.0, 0.0, 0.0)) -> np.ndarray:
