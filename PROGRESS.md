@@ -158,6 +158,25 @@ uv run python scripts/run_synthetic.py --no-gif    # fastest verify only
 uv run mjpython scripts/run_synthetic.py --view     # live window (when you're here)
 ```
 
+## Live Quest bring-up (started — blocked on headset being worn)
+Quest is connected over **USB/adb** (device `2G0YC5ZH5T005F`), transport = **orbit**
+native app (`com.ORBIT.Teleoperation`, installed). My side is fully ready and
+verified: `adb reverse` sets all 7 ports, the `OrbitVRSource` PULL sockets bind, the
+viz server starts, and **stale detection works** (reports STALE/LOST with no data —
+half of spec step 4). New reusable tool: `scripts/check_quest.py` (prints incoming
+head/hand poses + tracking flags + sample rate; auto-confirms when both hands stream).
+
+**Blocker:** `dumpsys power` shows `mWakefulness=Asleep` — the headset is in standby,
+not worn, so ORBIT can't run and nothing streams (an 85 s probe saw 0 messages). VR
+apps can't be launched from standby via adb. To finish spec step 4–5:
+1. Put the Quest ON, launch ORBIT from the app library, set BOTH controllers down,
+   hold hands in view.
+2. `uv run python scripts/check_quest.py` → expect TRACKED + a ~30–70 Hz wrist stream.
+3. Then `uv run mjpython -m bimanual_teleop.launch.run_sim --vr orbit`, do the
+   resting-stance calibration, and confirm a real wrist roll spins the commanded
+   (faint) + achieved (solid) triads together about the tool axis. If they diverge →
+   it's R_align/calibration (the IK is already cleared by the synthetic roll test).
+
 ## Adversarial verification (multi-agent workflow)
 Ran a 5-agent verification workflow (4 adversarial lenses + synthesis) over the
 branch diff. **Verdict: ship_with_notes — no must-fix items, no invariant
