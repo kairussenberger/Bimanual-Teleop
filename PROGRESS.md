@@ -158,6 +158,34 @@ uv run python scripts/run_synthetic.py --no-gif    # fastest verify only
 uv run mjpython scripts/run_synthetic.py --view     # live window (when you're here)
 ```
 
+## Adversarial verification (multi-agent workflow)
+Ran a 5-agent verification workflow (4 adversarial lenses + synthesis) over the
+branch diff. **Verdict: ship_with_notes — no must-fix items, no invariant
+violations, no broken tests, 52/52 re-verified independently.** It confirmed:
+relative+clutch mapping (not absolute), mink-only IK (no pseudoinverse anywhere),
+limits enforced in model + IK + elbow soft cap, frame transforms tested. It
+re-checked and *rejected* its own two "high" flags (the +90° roll test does NOT
+pass with an identity R_ALIGN; the j6 axis genuinely equals the EE tool axis).
+
+Addressed the high-value notes in commit "harden: …": de-circularized + tightened
+the J6 test, full-matrix ground truth on the +90° roll test, attenuation assertion
+on the filter step test, wrist-rotation round-trip in replay, loop-rate↔IK-dt
+consistency + flip-threshold fix in the harness, explicit replay_path error,
+unified CSV float formatting, and documented the inert `abs_orientation` flag.
+
+Deferred (genuinely low-priority, noted for later):
+- Independently verify the elbow invariant by commanding a hyperextension target and
+  asserting EE error grows (today's check confirms the imposed soft limit holds).
+- Add a large-roll (>j6 soft cap) trajectory to exercise the saturation/regrip
+  regime (current ROLL_AMP≈29° stays inside the cap).
+- Either remove `abs_orientation` entirely (touches config + arm_control) or wire an
+  absolute branch with a differentiating test — documented as inert for now.
+- The Section-3 quaternion change-of-basis helpers in `frames.py` are reference/
+  test-only; the live arm path maps orientation via `ClutchMapper.set_P`. Keep them
+  in sync or route the live path through them later.
+- The record half of record/replay (`SessionRecorder`) has no production caller yet;
+  wire it into `run_sim` (and feed `engaged_at` to the engine) when debugging replay.
+
 ## Known limitations / notes
 - Self-collision avoidance is a documented hook, not active (see above).
 - `out/`, `*.gif`, telemetry dumps are gitignored (generated artifacts).
