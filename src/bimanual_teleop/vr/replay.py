@@ -1,0 +1,147 @@
+"""Record + deterministic replay of a teleop session (spec Section 7, "Replay mode").
+
+Record a Quest session to disk, then replay it through the FULL pipeline so the loop
+can be debugged and bisected without wearing the headset. `ReplaySource` is a drop-in
+`VRSource` (start/stop/latest/frame_at), so the engine + supervisor see exactly what
+they would live — replay a recording, change a gain, replay again, compare.
+
+UNVERIFIED THIS RUN: recording a LIVE Quest feed needs the headset + operator (not
+available now). The record → save → load → replay machinery itself IS tested
+(tests/test_replay.py) on synthetic + hand-built frames; the only unverified step is
+capturing a real session, which is a next-session task once the headset is on.
+
+On-disk format (.npz):
+    t[N], head[N,4,4];
+    per side:  {side}_wrist[N,4,4], {side}_tracked[N] bool, {side}_pinch[N],
+               {side}_landmarks[N,25,3]  (NaN where the hand had no landmarks);
+    engaged[N,2] bool in SIDES order.
+"""
+from __future__ import annotations
+
+import time
+
+import numpy as np
+
+from ..config import SIDES
+from .frames import HandSample, VRFrame
+
+_N_LM = 25   # WebXR joints per hand
+
+
+class SessionRecorder:
+    """Accumulate (VRFrame, engaged, t) tuples and dump them to a .npz."""
+
+    def __init__(self):
+        self._t: list[float] = []
+        self._frames: list[VRFrame] = []
+        self._engaged: list[dict[str, bool]] = []
+
+    def __len__(self) -> int:
+        return len(self._t)
+
+    def add(self, frame: VRFrame, engaged: dict[str, bool], t: float) -> None:
+        self._t.append(float(t))
+        self._frames.append(frame)
+        self._engaged.append({s: bool(engaged.get(s, False)) for s in SIDES})
+
+    def save(self, path: str) -> str:
+        n = len(self._t)
+        cols: dict[str, np.ndarray] = {
+            "t": np.asarray(self._t, float),
+            "head": np.stack([np.asarray(f.head, float) for f in self._frames]) if n
+            else np.empty((0, 4, 4)),
+            "engaged": np.array([[e[s] for s in SIDES] for e in self._engaged], bool) if n
+            else np.empty((0, len(SIDES)), bool),
+        }
+        for s in SIDES:
+            wrist, tracked, pinch, lms = [], [], [], []
+            for f in self._frames:
+                h = f.hands.get(s)
+                if h is None:
+                    wrist.append(np.eye(4)); tracked.append(False); pinch.append(0.0)
+                    lms.append(np.full((_N_LM, 3), np.nan))
+                else:
+                    wrist.append(np.asarray(h.wrist, float))
+                    tracked.append(bool(h.tracked))
+                    pinch.append(float(h.pinch))
+                    lms.append(np.asarray(h.landmarks, float) if h.landmarks is not None
+                               else np.full((_N_LM, 3), np.nan))
+            cols[f"{s}_wrist"] = np.stack(wrist) if n else np.empty((0, 4, 4))
+            cols[f"{s}_tracked"] = np.asarray(tracked, bool)
+            cols[f"{s}_pinch"] = np.asarray(pinch, float)
+            cols[f"{s}_landmarks"] = np.stack(lms) if n else np.empty((0, _N_LM, 3))
+        np.savez_compressed(path, **cols)
+        return path
+
+
+class ReplaySource:
+    """A VRSource that replays a recording. Matches FakeVRSource's interface
+    (start/stop/latest/frame_at) so it drops straight into make_source / the engine."""
+
+    def __init__(self, path: str | None = None, *, data: dict | None = None, loop: bool = False):
+        self.loop = bool(loop)
+        d = data if data is not None else dict(np.load(path, allow_pickle=False))
+        self.t = np.asarray(d["t"], float)
+        self.head = np.asarray(d["head"], float)
+        self.engaged_arr = np.asarray(d["engaged"], bool)
+        self._side = {s: {"wrist": np.asarray(d[f"{s}_wrist"], float),
+                          "tracked": np.asarray(d[f"{s}_tracked"], bool),
+                          "pinch": np.asarray(d[f"{s}_pinch"], float),
+                          "landmarks": np.asarray(d[f"{s}_landmarks"], float)} for s in SIDES}
+        self._t0_wall: float | None = None
+
+    @classmethod
+    def from_recorder(cls, rec: SessionRecorder, **kw) -> "ReplaySource":
+        """Build a ReplaySource directly from a recorder, round-tripping through the
+        on-disk .npz schema (so replay is bit-identical to a saved+loaded session)."""
+        import io
+        buf = io.BytesIO()
+        rec.save(buf)                  # np.savez_compressed accepts a file-like
+        buf.seek(0)
+        return cls(data=dict(np.load(buf, allow_pickle=False)), **kw)
+
+    # --- introspection ------------------------------------------------------- #
+    def __len__(self) -> int:
+        return len(self.t)
+
+    @property
+    def duration(self) -> float:
+        return float(self.t[-1] - self.t[0]) if len(self.t) else 0.0
+
+    def _index(self, t: float) -> int:
+        """Index of the recorded sample at or just before time t (clamped)."""
+        if len(self.t) == 0:
+            raise IndexError("empty recording")
+        if self.loop and self.duration > 0:
+            t = self.t[0] + (t - self.t[0]) % self.duration
+        i = int(np.searchsorted(self.t, t, side="right") - 1)
+        return max(0, min(i, len(self.t) - 1))
+
+    # --- VRSource API -------------------------------------------------------- #
+    def frame_at(self, t: float) -> VRFrame:
+        i = self._index(t)
+        hands = {}
+        for s in SIDES:
+            d = self._side[s]
+            lm = d["landmarks"][i]
+            hands[s] = HandSample(tracked=bool(d["tracked"][i]), wrist=d["wrist"][i].copy(),
+                                  landmarks=(None if np.isnan(lm).all() else lm.copy()),
+                                  pinch=float(d["pinch"][i]))
+        return VRFrame(stamp=float(self.t[i]), head=self.head[i].copy(), hands=hands)
+
+    def engaged_at(self, t: float) -> dict[str, bool]:
+        row = self.engaged_arr[self._index(t)]
+        return {s: bool(row[k]) for k, s in enumerate(SIDES)}
+
+    def latest(self) -> VRFrame | None:
+        if len(self.t) == 0:
+            return None
+        if self._t0_wall is None:                 # synchronous: first recorded frame
+            return self.frame_at(self.t[0])
+        return self.frame_at(self.t[0] + (time.monotonic() - self._t0_wall))
+
+    def start(self) -> None:
+        self._t0_wall = time.monotonic()
+
+    def stop(self) -> None:
+        self._t0_wall = None

@@ -101,4 +101,7 @@ def make_source(rig: dict) -> VRSource:
     if transport == "orbit":
         from .orbit_source import OrbitVRSource
         return OrbitVRSource(rig)
+    if transport == "replay":
+        from .replay import ReplaySource
+        return ReplaySource(rig["vr"]["replay_path"], loop=rig["vr"].get("replay_loop", False))
     raise ValueError(f"unknown vr.transport: {transport!r}")
