@@ -41,11 +41,22 @@ class ArmIK:
 
         # SOFT joint limits = home ± margin (clamped to hard limits) so the IK
         # physically cannot fold the arm into a buckle.
-        hard_lo = np.asarray(rig["arms"]["joint_limits"]["lower"], dtype=float)
-        hard_hi = np.asarray(rig["arms"]["joint_limits"]["upper"], dtype=float)
+        self.hard_lo = np.asarray(rig["arms"]["joint_limits"]["lower"], dtype=float)
+        self.hard_hi = np.asarray(rig["arms"]["joint_limits"]["upper"], dtype=float)
         margin = np.asarray(ik.get("soft_margin", [1.4, 1.0, 1.4, 1.4, 1.5, 1.7]), dtype=float)
-        self.soft_lo = np.maximum(self.q0 - margin, hard_lo)
-        self.soft_hi = np.minimum(self.q0 + margin, hard_hi)
+        self.soft_lo = np.maximum(self.q0 - margin, self.hard_lo)
+        self.soft_hi = np.minimum(self.q0 + margin, self.hard_hi)
+        # Human-plausible ELBOW (invariant: no overextension). j3 is straightest at
+        # home and bends BOTH ways, but only +j3 is anatomical flexion; −j3 swings the
+        # forearm outward into a dislocated-looking bend. Floor j3 so it can't go there.
+        # Tunable: ik.elbow_min (rad). Raise toward q0 (~0.305) if it still looks wrong;
+        # set negative/None to disable.
+        emin = ik.get("elbow_min", None)
+        if emin is not None:
+            self.soft_lo[self.ELBOW] = max(self.soft_lo[self.ELBOW], float(emin))
+        emax = ik.get("elbow_max", None)
+        if emax is not None:
+            self.soft_hi[self.ELBOW] = min(self.soft_hi[self.ELBOW], float(emax))
         for i, j in enumerate(self.joints):
             jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, j)
             self.model.jnt_range[jid] = [self.soft_lo[i], self.soft_hi[i]]
@@ -83,6 +94,20 @@ class ArmIK:
         self.dt = 1.0 / rig["control"]["arm_hz"]
         self.iters = int(ik.get("iters", 4))
         self.reset()
+
+    def set_elbow_min(self, val: float) -> float:
+        """Live-set the elbow (j3) lower limit and rebuild the IK ConfigurationLimit,
+        so you can dial out the wrong-way bend in real time. Clamped to the hard limit
+        and below soft_hi. Returns the applied value."""
+        e = self.ELBOW
+        v = float(np.clip(val, self.hard_lo[e], self.soft_hi[e] - 0.05))
+        self.soft_lo[e] = v
+        jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, self.joints[e])
+        self.model.jnt_range[jid] = [v, self.soft_hi[e]]
+        clim = mink.ConfigurationLimit(self.model)   # caches ranges -> must rebuild
+        self.limits_pos[0] = clim
+        self.limits_ori[0] = clim
+        return v
 
     def reset(self) -> None:
         self.config.update(self.q0)

@@ -78,6 +78,7 @@ class VuerVRSource(VRSource):
         self._frame = VRFrame(hands={s: HandSample() for s in SIDES})
         self._robot_viz: dict[str, list] = {}   # side -> 16-float col-major matrix (robot hand frame, WebXR)
         self._calib: dict | None = None          # in-headset calibration banner state
+        self._hud: list[str] = []                # in-headset live status/log lines
         self._thread: threading.Thread | None = None
         self._app = None
 
@@ -93,6 +94,14 @@ class VuerVRSource(VRSource):
         publishes it each tick as engine.calib_status). None = hide the banner."""
         with self._lock:
             self._calib = dict(status) if status else None
+
+    def set_hud(self, lines) -> None:
+        """Push a list of status/log text lines to render in-headset (called every
+        control tick). This is the in-headset 'logs' panel: tracking flags, wrist
+        roll, clutch/calib state, loop rate — so the operator is never flying blind.
+        Pass [] / None to clear it."""
+        with self._lock:
+            self._hud = [str(x) for x in lines] if lines else []
 
     def latest(self) -> VRFrame | None:
         # Return an atomic snapshot so a control tick can't read a half-updated
@@ -169,6 +178,25 @@ class VuerVRSource(VRSource):
                  fontSize=0.04, color="#cdd6f4", anchorX="center", anchorY="middle"),
             key="calib", position=[0.0, 1.5, -1.0])
 
+    def _hud_panel(self):
+        """Build the always-on in-headset status/log panel: a left-anchored Billboard
+        of monospace Text lines, pinned to the upper-left of your view. Empty -> clears."""
+        from vuer.schemas import Billboard, Text
+        with self._lock:
+            lines = list(self._hud)
+        if not lines:
+            return Billboard(key="hud", position=[-0.62, 1.62, -1.0])
+        children = []
+        y = 0.0
+        for i, ln in enumerate(lines[:9]):           # cap so it stays readable
+            color = "#a6e3a1" if " OK" in ln or "TRK" in ln else (
+                "#f38ba8" if "LOST" in ln else "#cdd6f4")
+            children.append(Text(ln, key=f"hud_{i}", position=[0.0, y, 0.0],
+                                 fontSize=0.045, color=color, anchorX="left",
+                                 anchorY="middle", font="monospace"))
+            y -= 0.072
+        return Billboard(*children, key="hud", position=[-0.62, 1.62, -1.0])
+
     def _serve(self) -> None:  # pragma: no cover - needs vuer + a headset
         from vuer import Vuer
         from vuer.schemas import Hands, CoordsMarker
@@ -226,6 +254,7 @@ class VuerVRSource(VRSource):
                             key=f"rb_{side}", matrix=_coords_mat(_VIZ_POS[f"rb_{side}"], rb),
                             scale=0.13, headScale=1.6)
                 session.upsert @ self._calib_banner()   # in-headset calibration countdown
+                session.upsert @ self._hud_panel()      # in-headset live status/log panel
                 tick += 1
                 if self.debug and tick % 60 == 0:
                     d = self._dbg

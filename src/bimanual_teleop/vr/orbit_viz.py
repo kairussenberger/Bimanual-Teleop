@@ -92,14 +92,19 @@ function loop(){requestAnimationFrame(loop);
   if(latest){
     updHand(hands.right,latest.hands.right);updHand(hands.left,latest.hands.left);
     const hp=(latest.head&&(latest.head.age==null||latest.head.age<0.5))?latest.head:null;
-    if(hp){const b=basis(hp.quat);head.visible=true;head.position.set(0,0,0);head.lookAt(b.f);
-      const apex=new THREE.Vector3(),fc=apex.clone().addScaledVector(b.f,FD);
+    if(hp){const b=basis(hp.quat);const hpos=new THREE.Vector3(...hp.pos);
+      // Head + hands live in ONE world frame (wrist.pos == hand keypoint[0]); the
+      // head MUST be drawn at its real tracked position, else the hands (rendered at
+      // their world coords) float ~1m off from the head box. Then the chase camera
+      // rides BEHIND + ABOVE the head looking forward, so the hands sit in front of it.
+      head.visible=true;head.position.copy(hpos);head.lookAt(hpos.clone().add(b.f));
+      const apex=hpos.clone(),fc=apex.clone().addScaledVector(b.f,FD);
       const hw=FD*Math.tan(HFOV/2),hh=FD*Math.tan(VFOV/2);
       const c=[[1,1],[-1,1],[-1,-1],[1,-1]].map(([sx,sy])=>fc.clone().addScaledVector(b.r,sx*hw).addScaledVector(b.u,sy*hh));
       const segs=[];for(const cc of c){segs.push(apex,cc);}for(let i=0;i<4;i++)segs.push(c[i],c[(i+1)%4]);
       const fa=fov.geometry.attributes.position.array;let j=0;for(const v of segs){fa[j++]=v.x;fa[j++]=v.y;fa[j++]=v.z;}
       fov.geometry.attributes.position.needsUpdate=true;fov.visible=true;
-      if(mode==='front'){cam.position.set(0,0.12,0).addScaledVector(b.f,-0.42);cam.up.set(0,1,0);cam.lookAt(b.f.clone().multiplyScalar(0.45));}
+      if(mode==='front'){cam.position.copy(hpos).addScaledVector(b.f,-0.55).addScaledVector(b.u,0.18);cam.up.set(0,1,0);cam.lookAt(hpos.clone().addScaledVector(b.f,0.45));}
     }else{head.visible=false;fov.visible=false;}
     document.getElementById('hud').innerHTML=`<b>ORBIT hands</b> &nbsp; R: ${fmt(latest.hands.right,'r')} &nbsp; L: ${fmt(latest.hands.left,'l')}`+
       `<br><span class=r>blue=right</span> <span class=l>red=left</span> · triad=wrist · yellow=FOV · <b>F</b> front-lock <b>O</b> orbit`;

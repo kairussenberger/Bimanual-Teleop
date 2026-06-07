@@ -54,6 +54,10 @@ ik:
   # SOFT joint limits = home ± this margin (rad). Caps each joint near home so the
   # arm physically cannot fold into a buckle. Smaller = safer but less reach.
   soft_margin: [1.4, 1.0, 1.4, 1.4, 1.5, 1.7]   # 6 joints (j6 = wrist roll)
+  # Human-plausible ELBOW (j3) floor: j3 bends both ways from its straightest (home),
+  # but only +j3 is anatomical flexion; below this it swings the forearm outward into
+  # the dislocated-looking "overextension". Tune live in run_sim with the o/p keys.
+  elbow_min: 0.20
   solver: daqp
 
 mapping:

@@ -135,15 +135,21 @@ def _push_robot_frames(src, engine, frame) -> None:
         src.set_robot_frame(s, R_webxr)
 
 
-def _draw_frames(scn, engine) -> None:
+def _draw_frames(scn, engine, frame=None, engaged=None, calibrating=False) -> None:
     """Overlay, at each robot hand: SOLID triad = where the robot's EE actually is;
     FAINT longer triad = the orientation the operator is commanding. If wrist ROLL
     is mapped right, twisting your hand spins the faint triad about its blue axis and
     the solid one follows; if instead the arm arcs, the two diverge — that's the bug,
-    now visible. (For a fuller side-by-side + live frame tuning, see
-    tools/mapping_studio.py.)"""
+    now visible.
+
+    Plus a STATUS DOT above each hand so you never need the terminal:
+      GREEN  = that hand is tracked AND driving the arm,
+      YELLOW = calibrating — hold the rest pose (arms down, palms inward),
+      RED    = that hand is NOT tracked (no data / out of camera view)."""
+    import numpy as np
     from ..viz import overlay
     scn.ngeom = 0
+    engaged = engaged or {}
     for s in SIDES:
         ac = engine.arm[s]
         ee = ac.ik.fk_ee()
@@ -151,6 +157,145 @@ def _draw_frames(scn, engine) -> None:
         overlay.triad(scn, pos, ac.base_R @ ee.rotation().as_matrix(), 0.12, 0.007, 1.0)  # actual
         if ac.cmd_R is not None:
             overlay.triad(scn, pos, ac.base_R @ ac.cmd_R, 0.17, 0.004, 0.4)               # commanded
+        h = frame.hands.get(s) if frame else None
+        tracked = bool(h and getattr(h, "tracked", False))
+        if calibrating:
+            col = (1.0, 0.85, 0.2, 1.0)            # yellow: calibrating
+        elif tracked and engaged.get(s):
+            col = (0.15, 0.9, 0.3, 1.0)            # green: tracked + driving
+        elif tracked:
+            col = (0.3, 0.6, 1.0, 1.0)             # blue: tracked but not engaged
+        else:
+            col = (0.95, 0.2, 0.2, 1.0)            # red: not tracked
+        overlay.sphere(scn, pos + np.array([0.0, 0.0, 0.22]), 0.035, col)
+
+
+def _rpy_deg(R) -> tuple[float, float, float]:
+    """ZYX roll/pitch/yaw (deg) of a 3x3 rotation — roll is the forearm twist."""
+    import math
+    roll = math.degrees(math.atan2(R[2, 1], R[2, 2]))
+    pitch = math.degrees(math.atan2(-R[2, 0], (R[2, 1] ** 2 + R[2, 2] ** 2) ** 0.5))
+    yaw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+    return roll, pitch, yaw
+
+
+def _hud_lines(engine, frame, engaged, hz) -> list[str]:
+    """The in-headset status/log lines (Section 6 HUD, headset edition): calib/teleop
+    state, loop rate, and per-hand tracked + live wrist roll + clutch state."""
+    import numpy as np
+    cal = engine.calib_status
+    if cal and cal.get("active") and cal.get("phase") != "done":
+        lines = [f"CALIB {cal.get('phase', ''):>4} {cal.get('remaining', 0):.0f}s",
+                 str(cal.get("msg", ""))[:24]]
+    else:
+        lines = [f"TELEOP   {hz:4.0f} Hz"]
+    for s in SIDES:
+        h = frame.hands.get(s) if frame else None
+        tag = s[0].upper()
+        if h is not None and h.tracked:
+            roll, _, _ = _rpy_deg(np.asarray(h.wrist, float)[:3, :3])
+            eng = "ENG" if engaged.get(s) else "off"
+            lines.append(f"{tag} TRK roll{roll:+4.0f}  {eng}")
+        else:
+            lines.append(f"{tag} LOST")
+    return lines
+
+
+# Starting view: stand BEHIND the robot (camera on -y) and ABOVE it, looking
+# forward (+y) and down over its shoulders — the natural teleoperator vantage, and
+# +x (robot's right arm) lands on screen-right so left/right match the operator.
+_CAM_BEHIND_ABOVE = dict(azimuth=180, elevation=-40, distance=2.0,
+                         lookat=(0.0, 0.05, 0.95))
+
+
+def _set_start_camera(cam) -> None:
+    cam.azimuth = _CAM_BEHIND_ABOVE["azimuth"]
+    cam.elevation = _CAM_BEHIND_ABOVE["elevation"]
+    cam.distance = _CAM_BEHIND_ABOVE["distance"]
+    cam.lookat[:] = _CAM_BEHIND_ABOVE["lookat"]
+
+
+def _place_window_left(width_frac: float = 0.5) -> None:
+    """macOS: dock the MuJoCo viewer window to the LEFT of the current display,
+    instead of letting it open centered / on a separate fullscreen Space ("home").
+    Best-effort and async: the window doesn't exist yet when the viewer launches,
+    so a daemon thread polls for it via System Events. Needs Accessibility
+    permission for the terminal/IDE running this; if that's not granted it just
+    leaves the window where it is and prints a one-line hint."""
+    import platform
+    if platform.system() != "Darwin":
+        return
+    # Find the window titled "MuJoCo : ..." across all processes and pin it to the
+    # left column of the main display. Returns "ok" once moved, "none" until then.
+    script = """
+    tell application "Finder" to set b to bounds of window of desktop
+    set winW to ((item 3 of b) * %f) as integer
+    set winH to (item 4 of b) - 25
+    set moved to "none"
+    tell application "System Events"
+        repeat with proc in (every application process)
+            try
+                repeat with w in (every window of proc)
+                    if name of w contains "MuJoCo" then
+                        set position of w to {0, 25}
+                        set size of w to {winW, winH}
+                        set moved to "ok"
+                    end if
+                end repeat
+            end try
+        end repeat
+    end tell
+    return moved
+    """ % width_frac
+
+    def worker():
+        for _ in range(16):
+            time.sleep(0.5)
+            try:
+                out = subprocess.run(["osascript", "-e", script],
+                                     capture_output=True, text=True, timeout=5)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return
+            if out.stdout.strip() == "ok":
+                return
+            err = (out.stderr or "").lower()
+            if "not allowed" in err or "-1743" in err or "assistive" in err:
+                print("(left-dock skipped: grant Accessibility to your terminal/IDE in "
+                      "System Settings > Privacy & Security > Accessibility)", flush=True)
+                return
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _make_key_cb(engine):
+    """Live tuning while teleoperating (no terminal needed for the feel — you adjust
+    by hand and watch the robot). Keys in the MuJoCo window:
+      ] / [   reach scale up / down   (robot arms bigger -> scale your motion up)
+      p / o   elbow floor up / down   (p = keep the elbow more BENT / kill overextension;
+                                       o = allow it straighter / more reach)
+    Re-anchors each mapper so scale changes don't jump."""
+    def cb(keycode):
+        ch = chr(keycode) if 0 <= keycode < 0x110000 else ""
+        if ch in ("o", "p"):                  # live ELBOW floor
+            de = 0.1 if ch == "p" else -0.1
+            v = 0.0
+            for s in SIDES:
+                ik = engine.arm[s].ik
+                v = ik.set_elbow_min(ik.soft_lo[ik.ELBOW] + de)
+            print(f"[tune] elbow floor (j3 min) -> {v:.2f} rad "
+                  f"(higher = more bent, less overextension)", flush=True)
+            return
+        if ch in ("]", "=", "+"):
+            d = 0.1
+        elif ch in ("[", "-", "_"):
+            d = -0.1
+        else:
+            return
+        for s in SIDES:
+            m = engine.arm[s].mapper
+            m.scale = float(min(3.0, max(0.2, m.scale + d)))
+            m.release()                       # re-anchor on next tick -> no jump
+        print(f"[tune] reach scale -> {engine.arm['left'].mapper.scale:.2f}", flush=True)
+    return cb
 
 
 def run_viewer(args) -> int:
@@ -182,22 +327,35 @@ def run_viewer(args) -> int:
         _print_lan_url()
     push_viz = hasattr(src, "set_robot_frame")    # in-headset frame visualization (Vuer)
     push_calib = hasattr(src, "set_calib")        # in-headset calibration countdown (Vuer)
+    push_hud = hasattr(src, "set_hud")            # in-headset live status/log panel (Vuer)
+    from ..logging_utils import RateMeter
+    rate = RateMeter()
+    _t_prev = None
     try:
-        with mujoco.viewer.launch_passive(world.model, world.data) as v:
+        _place_window_left()                       # dock the window to the left of the screen (macOS)
+        with mujoco.viewer.launch_passive(world.model, world.data,
+                                          key_callback=_make_key_cb(engine)) as v:
+            _set_start_camera(v.cam)               # start behind + above the robot, looking forward
             print("\n  ON-SCREEN MAPPING VIZ: at each robot hand, the SOLID RGB triad is\n"
                   "  the robot's actual hand frame, the FAINT longer triad is what your\n"
                   "  hand is COMMANDING. Twist your wrist — they should spin together about\n"
                   "  the blue axis. If they diverge, that's the mapping bug, now on screen.\n", flush=True)
             while v.is_running():
                 t = time.monotonic()   # one clock shared with the source stamps + supervisor
+                if _t_prev is not None:
+                    rate.update(t - _t_prev)
+                _t_prev = t
                 frame = src.latest()
-                engine.tick(frame, supervisor.update(frame, t), t)
+                eng = supervisor.update(frame, t)
+                engine.tick(frame, eng, t)
                 if push_calib:
                     src.set_calib(engine.calib_status)
+                if push_hud:
+                    src.set_hud(_hud_lines(engine, frame, eng, rate.hz))
                 if push_viz and frame is not None:
                     _push_robot_frames(src, engine, frame)
                 if getattr(v, "user_scn", None) is not None:
-                    _draw_frames(v.user_scn, engine)       # overlay frames in the MuJoCo window
+                    _draw_frames(v.user_scn, engine, frame, eng, not engine.calibrated)
                 world.step(2)
                 v.sync()
                 time.sleep(1 / 120)
