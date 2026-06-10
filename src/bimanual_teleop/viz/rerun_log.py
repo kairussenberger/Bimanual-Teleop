@@ -38,9 +38,18 @@ class RerunLogger:
             return
         self.rr = rr
         try:
-            rr.init(app_id, spawn=spawn)
-            if save_path:                       # log to a .rrd file (open later with `rerun FILE`)
-                rr.save(str(save_path))
+            rr.init(app_id)
+            # NOTE: rr.save() REDIRECTS the stream to the file — it does not add a
+            # sink. With both a viewer and a file requested, tee explicitly via
+            # set_sinks, or the spawned viewer sits empty while the .rrd gets
+            # everything (the bug this replaced).
+            if spawn and save_path:
+                rr.spawn(connect=False)         # launch the viewer app
+                rr.set_sinks(rr.GrpcSink(), rr.FileSink(str(save_path)))
+            elif spawn:
+                rr.spawn()                      # launch viewer + connect the stream
+            elif save_path:
+                rr.save(str(save_path))         # file only (open later with `rerun FILE`)
         except Exception:
             self.rr = None                      # init failed -> stay a no-op
 
