@@ -155,6 +155,13 @@ scalars come along for free, and with `--vr replay` the Rerun timeline scrubs th
 whole session. `--viz-save out/session.rrd` logs the same scene to a file instead
 of opening a window.
 
+Watchable movie (no viewer app at all — renders a GIF/PNG of both tracked hands
+next to the robot with real YAM mesh geometry, through the real engine):
+
+```sh
+uv run --with matplotlib python scripts/render_session.py recordings/session.npz --gif out/session.gif
+```
+
 Mapping scorer (replays a recording through the real engine and grades it):
 
 ```sh
