@@ -16,9 +16,19 @@ import pinocchio as pin
 
 MJCF_DIR = Path(__file__).resolve().parents[1] / "sim" / "models" / "yam_real" / "mjcf"
 STAND_DIR = Path(__file__).resolve().parents[1] / "sim" / "models" / "yam_real" / "assets" / "stand"
-# The official ORCA hand description lives in a SIBLING repo (same convention as
-# the orca-core editable dependency in pyproject).
-ORCA_DESC_DIR = Path(__file__).resolve().parents[3].parent / "orcahand_description" / "v2" / "models"
+# ORCA hand model sources, best first: the full-resolution official description
+# (SIBLING repo, github.com/orcahand/orcahand_description, MIT) and the
+# render-grade simplified copy VENDORED in this repo (scripts/vendor_orcahand.py)
+# so fresh clones draw the real hand with no extra setup.
+ORCA_DESC_SIBLING = Path(__file__).resolve().parents[3].parent / "orcahand_description" / "v2" / "models"
+ORCA_DESC_VENDORED = Path(__file__).resolve().parents[1] / "sim" / "models" / "orcahand_v2" / "models"
+
+
+def _orca_desc_dir() -> Path | None:
+    for cand in (ORCA_DESC_SIBLING, ORCA_DESC_VENDORED):
+        if (cand / "mjcf" / "orcahand_right.mjcf").exists():
+            return cand
+    return None
 
 
 def load_stl(path: str) -> np.ndarray:
@@ -133,13 +143,19 @@ def world_tris(model, data, items, q, base_T) -> list[np.ndarray]:
 # frame, so geom transforms compose directly with the EE world pose.
 # --------------------------------------------------------------------------- #
 def orca_description_available() -> bool:
-    return (ORCA_DESC_DIR / "mjcf" / "orcahand_right.mjcf").exists()
+    return _orca_desc_dir() is not None
 
 
-def load_orca_hand(side: str, max_tris_per_geom: int = 150):
+def load_orca_hand(side: str, max_tris_per_geom: int = 150, desc_models_dir=None):
     """(model, data, items) for the REAL ORCA hand; items carry per-geom `tris`
-    (geom frame), `jid`, `place`, and an `rgb` skin/structure tint."""
-    mjcf = ORCA_DESC_DIR / "mjcf"
+    (geom frame), `jid`, `place`, and an `rgb` skin/structure tint. Loads from
+    `desc_models_dir` if given, else the sibling full-res description, else the
+    vendored simplified copy."""
+    desc = Path(desc_models_dir) if desc_models_dir is not None else _orca_desc_dir()
+    if desc is None:
+        raise FileNotFoundError("no ORCA hand description found (sibling or vendored)")
+    src_tag = "sibling" if desc == ORCA_DESC_SIBLING else "vendored"
+    mjcf = desc / "mjcf"
     adoc = ET.parse(mjcf / f"orcahand_{side}.mjcf").getroot()
     default = adoc.find("default")
     dscale = 1.0
@@ -150,7 +166,7 @@ def load_orca_hand(side: str, max_tris_per_geom: int = 150):
     for m in asset_src.findall("mesh"):
         rel = m.get("file")
         path = None
-        for base in (mjcf, ORCA_DESC_DIR.parent, ORCA_DESC_DIR):
+        for base in (mjcf, desc.parent, desc):
             cand = (base / rel).resolve()
             if cand.exists():
                 path = cand
@@ -189,7 +205,7 @@ def load_orca_hand(side: str, max_tris_per_geom: int = 150):
         if not path or not Path(path).exists():
             continue
         skin = "skin" in Path(path).name.lower()
-        key = f"orca_{side}_{Path(path).stem}"
+        key = f"orca_{src_tag}_{side}_{Path(path).stem}"
         items.append({"tris": simplify(load_stl(path) * scale, max_tris_per_geom, cache_key=key),
                       "jid": g.parentJoint,
                       "place": g.placement.homogeneous,

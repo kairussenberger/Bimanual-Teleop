@@ -93,8 +93,9 @@ Two sibling repos sit next to this one (same parent directory):
 Developer/
 ├── Bimanual-Humanoid-Manipulator/   ← this repo
 ├── orca_core/                       ← ORCA hand driver (editable dependency, REQUIRED)
-└── orcahand_description/            ← official ORCA hand meshes (OPTIONAL — used by
-                                       the renderers; falls back to a stylized hand)
+└── orcahand_description/            ← OPTIONAL full-res ORCA meshes (a render-grade
+                                       simplified copy of the real model is VENDORED in
+                                       this repo, so everything works without it)
 ```
 
 ```sh
