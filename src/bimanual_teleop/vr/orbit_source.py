@@ -68,9 +68,12 @@ def _parse_hand(raw: str) -> np.ndarray | None:
     if not pts:
         return None
     try:
-        return np.array([[float(v) for v in t.split(",")] for t in pts], dtype=float)
+        arr = np.array([[float(v) for v in t.split(",")] for t in pts], dtype=float)
     except ValueError:
         return None
+    if arr.ndim != 2 or arr.shape[1] != 3 or not np.all(np.isfinite(arr)):
+        return None
+    return arr
 
 
 def _parse_pose(raw: str) -> tuple[np.ndarray, np.ndarray] | None:
@@ -82,6 +85,8 @@ def _parse_pose(raw: str) -> tuple[np.ndarray, np.ndarray] | None:
         pos = np.array([float(t[1]), float(t[2]), float(t[3])])
         q = np.array([float(t[4]), float(t[5]), float(t[6]), float(t[7])])
     except ValueError:
+        return None
+    if not np.all(np.isfinite(pos)) or not np.all(np.isfinite(q)):
         return None
     n = np.linalg.norm(q)
     return (pos, q / n) if n > 1e-9 else None
@@ -105,17 +110,19 @@ class OrbitVRSource(VRSource):
         v = rig.get("vr", {})
         self.debug = bool(v.get("debug", debug))
         self.timeout = float(v.get("orbit_timeout", 0.3))   # s before a hand reads "not tracked"
+        self.head_timeout = float(v.get("orbit_head_timeout", max(1.0, self.timeout)))
         self.auto_reverse = bool(v.get("orbit_adb_reverse", True))
         self.S4 = _S4(str(v.get("orbit_flip", "z")))
         self.viz_port = int(v.get("orbit_viz_port", 8099))
         self.viz_enabled = bool(v.get("orbit_viz", True))
         self.viz_url = None
         self._viz_srv = None
-        self.overlay = {}          # consumers (e.g. head_map calibration) set this; viz renders it
+        self.overlay = {}          # optional debug/calibration overlays rendered by orbit_viz
         self._lock = threading.Lock()
         self._wrist: dict[str, np.ndarray | None] = {s: None for s in SIDES}
         self._lm: dict[str, np.ndarray | None] = {s: None for s in SIDES}
-        self._last: dict[str, float] = {s: 0.0 for s in SIDES}
+        self._wrist_last: dict[str, float] = {s: 0.0 for s in SIDES}
+        self._lm_last: dict[str, float] = {s: 0.0 for s in SIDES}
         self._head = np.eye(4)
         self._head_last = 0.0
         self.counts = {"hand": 0, "wrist": 0, "head": 0}
@@ -141,13 +148,16 @@ class OrbitVRSource(VRSource):
         with self._lock:
             hands = {}
             for s in SIDES:
-                w, lm, last = self._wrist[s], self._lm[s], self._last[s]
-                if w is not None and (now - last) < self.timeout:
+                w = self._wrist[s]
+                wrist_fresh = w is not None and (now - self._wrist_last[s]) < self.timeout
+                lm = self._lm[s] if (now - self._lm_last[s]) < self.timeout else None
+                if wrist_fresh:
                     hands[s] = HandSample(tracked=True, wrist=w, landmarks=lm,
                                           pinch=_pinch_from_landmarks(lm))
                 else:
                     hands[s] = HandSample(tracked=False)
-            return VRFrame(stamp=now, head=self._head.copy(), hands=hands)
+            head = self._head.copy() if self._head_last > 0 and (now - self._head_last) < self.head_timeout else None
+            return VRFrame(stamp=now, head=head, hands=hands)
 
     def start(self) -> None:
         if self.auto_reverse:
@@ -194,10 +204,10 @@ class OrbitVRSource(VRSource):
                 lm = self._lm[side]
                 if lm is None:
                     return None
-                d = {"pts": lm.round(4).tolist(), "age": round(now - self._last[side], 3)}
+                d = {"pts": lm.round(4).tolist(), "age": round(now - self._lm_last[side], 3)}
                 if self._wrist[side] is not None:
                     pos, quat = self._mat_to_pos_quat(self._wrist[side])
-                    d["wrist"] = {"pos": pos, "quat": quat}
+                    d["wrist"] = {"pos": pos, "quat": quat, "age": round(now - self._wrist_last[side], 3)}
                 return d
             head = None
             if self._head_last > 0:
@@ -291,7 +301,7 @@ class OrbitVRSource(VRSource):
             lm = self._conv_points(np.delete(pts, 1, axis=0))   # drop Palm[1] -> 25 WebXR joints
             with self._lock:
                 self._lm[key] = lm
-                self._last[key] = now
+                self._lm_last[key] = now
             self.counts["hand"] += 1
         elif kind == "wrist":
             parsed = _parse_pose(msg)
@@ -300,7 +310,7 @@ class OrbitVRSource(VRSource):
             M = self._conv_pose(*parsed)
             with self._lock:
                 self._wrist[key] = M
-                self._last[key] = now
+                self._wrist_last[key] = now
             self.counts["wrist"] += 1
         elif kind == "head":
             parsed = _parse_pose(msg)

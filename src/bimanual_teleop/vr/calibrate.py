@@ -1,22 +1,24 @@
-"""Operator-frame calibration — RESTING-POSE variant.
+"""Operator body-frame helpers + the OPTIONAL legacy startup stillness hold.
 
-The operator stands with both arms hanging at their sides, relaxed, palms rolled
-inward toward their body — mirroring the robot's frozen ragdoll-hang `neutral_q`
-(see docs/RESTING_POSE.md). We hold that for `vr.calib_seconds` and measure the
-correspondence "operator at rest ↔ robot at rest", from which arm motion proceeds.
+The pieces the runtime actually depends on are stateless:
+  - `head_op_axes`: operator body axes (right/up/forward) from the head pose;
+  - `body_relative_hand_sample`: wrist pose re-expressed relative to the torso
+    proxy in those body axes (what arm control consumes);
+  - `R_base_from_body` / `W_AXES`: the fixed body→robot-world axis map shared by
+    translation AND rotation in ClutchMapper.
 
-Key change from the old palms-down-forward stance: the operator's BODY axes come
-from the HEAD pose (where you're facing + gravity), NOT from hand geometry. With
-hands at your sides the fingers point down, so the old fingertips-as-forward
-measurement was degenerate — it corrupted both the position frame R and the wrist
-orientation correspondence P (the flipped-wrist bug). The head is reliable in any
-hand pose. The wrist's resting orientation still gives the per-hand reference.
+There is NO stance/orientation calibration anymore: the old `vr.calib_seconds`
+hold built a hand-local↔EE-local correspondence (P) from an assumed arms-at-sides
+pose, and any deviation from that stance scrambled every commanded rotation axis
+(measured ≈145° median axis error on a real Quest session). The `Calibrator` class
+remains for the optional stillness/quality gate and for the legacy
+non-body-relative mapping R used only in diagnostics (`vr.body_relative: false`).
 """
 from __future__ import annotations
 
 import numpy as np
 
-from .frames import quat_to_R
+from .frames import HandSample, quat_to_R
 
 # WebXR 25-joint indices (W3C order)
 W_WRIST = 0
@@ -31,6 +33,21 @@ W_AXES = np.column_stack([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]])
 
 # WebXR gravity-up (the headset floor frame is +Y up).
 _UP = np.array([0.0, 1.0, 0.0])
+_DEFAULT_TORSO_FROM_HEAD = np.array([0.0, -0.35, 0.0])
+
+
+def _finite_array(value, shape: tuple[int, ...]) -> np.ndarray | None:
+    try:
+        arr = np.asarray(value, dtype=float).reshape(shape)
+    except (TypeError, ValueError):
+        return None
+    return arr if np.all(np.isfinite(arr)) else None
+
+
+def _safe_untracked_copy(hand: HandSample) -> HandSample:
+    wrist = _finite_array(hand.wrist, (4, 4))
+    return HandSample(tracked=False, wrist=wrist.copy() if wrist is not None else np.eye(4),
+                      landmarks=hand.landmarks, pinch=hand.pinch)
 
 
 def head_op_axes(head_mat: np.ndarray) -> np.ndarray:
@@ -89,6 +106,44 @@ def R_base_from_op(op_axes: np.ndarray, base_quat) -> np.ndarray:
     return quat_to_R(base_quat).T @ R_world_from_vr           # world → base
 
 
+def R_base_from_body(base_quat) -> np.ndarray:
+    """Map an operator BODY-frame wrist displacement into one arm's IK base frame.
+
+    Body-frame coordinates are `[right, up, forward]`. The robot world convention is
+    right→+Y, up→+Z, forward→−X, which is exactly `W_AXES`.
+    """
+    return quat_to_R(base_quat).T @ W_AXES
+
+
+def body_relative_hand_sample(hand: HandSample | None, head_mat: np.ndarray | None,
+                              torso_from_head=(0.0, -0.35, 0.0)) -> HandSample | None:
+    """Return a copy of `hand` whose wrist pose is expressed relative to the current
+    operator torso/body frame.
+
+    `torso_from_head` is in body coordinates `[right, up, forward]`; the default is
+    roughly upper-torso/shoulder height below the headset. Translation becomes the
+    vector from this torso proxy to the wrist in body axes. Rotation becomes wrist
+    orientation in the same body axes.
+    Landmarks are intentionally left unchanged because finger retargeting consumes
+    their raw local hand geometry, not the arm-control wrist origin.
+    """
+    if hand is None or not hand.tracked:
+        return hand
+    if head_mat is None:
+        return _safe_untracked_copy(hand)
+    H = _finite_array(head_mat, (4, 4))
+    W = _finite_array(hand.wrist, (4, 4))
+    torso_body = _finite_array(torso_from_head, (3,))
+    if H is None or W is None or torso_body is None:
+        return _safe_untracked_copy(hand)
+    op_axes = head_op_axes(H)
+    torso_world = H[:3, 3] + op_axes @ torso_body
+    wrist = W.copy()
+    wrist[:3, 3] = op_axes.T @ (W[:3, 3] - torso_world)
+    wrist[:3, :3] = op_axes.T @ W[:3, :3]
+    return HandSample(tracked=hand.tracked, wrist=wrist, landmarks=hand.landmarks, pinch=hand.pinch)
+
+
 def calibrate_R(lm_avg: np.ndarray, base_quat) -> np.ndarray:
     """Legacy hand-stance R (kept for back-compat / fallback)."""
     return R_base_from_op(operator_axes(lm_avg), base_quat)
@@ -100,17 +155,28 @@ class Calibrator:
         self._samples: dict[str, list] = {"left": [], "right": []}
         self._wrists: dict[str, list] = {"left": [], "right": []}   # wrist rotation 3x3
         self._wrist_pos: dict[str, list] = {"left": [], "right": []}  # wrist translation
+        self._wrist_heads: dict[str, list] = {"left": [], "right": []}  # head 4x4 paired with wrist samples
         self._heads: list = []                                       # head 3x3, shared
+        torso = _finite_array(rig.get("vr", {}).get("torso_from_head", _DEFAULT_TORSO_FROM_HEAD), (3,))
+        self._torso_from_head = torso if torso is not None else _DEFAULT_TORSO_FROM_HEAD.copy()
 
     def add(self, side: str, landmarks, wrist=None, head=None) -> None:
-        if landmarks is not None:
-            self._samples[side].append(np.asarray(landmarks, dtype=float).reshape(25, 3))
+        lm = _finite_array(landmarks, (25, 3)) if landmarks is not None else None
+        if lm is not None:
+            self._samples[side].append(lm)
+        H = _finite_array(head, (4, 4)) if head is not None else None
         if wrist is not None:
-            w = np.asarray(wrist, dtype=float).reshape(4, 4)
+            w = _finite_array(wrist, (4, 4))
+            if w is None:
+                if H is not None:
+                    self._heads.append(H[:3, :3])
+                return
             self._wrists[side].append(w[:3, :3])
             self._wrist_pos[side].append(w[:3, 3])
-        if head is not None:
-            self._heads.append(np.asarray(head, dtype=float).reshape(4, 4)[:3, :3])
+            if H is not None:
+                self._wrist_heads[side].append(H)
+        if H is not None:
+            self._heads.append(H[:3, :3])
 
     def count(self, side: str) -> int:
         return len(self._wrists[side]) or len(self._samples[side])
@@ -144,13 +210,28 @@ class Calibrator:
         base_quat = self.rig["arms"][side]["base_quat"]
         R = R_base_from_op(op, base_quat)
         wrist_ref = _avg_rotation(w[-30:])
-        # Stillness from wrist TRANSLATION jitter over the window (fingertips-forward
-        # is meaningless with the hand at the side, so don't use it).
-        pos = np.stack(self._wrist_pos[side][-30:]) if self._wrist_pos[side] else None
+        # Stillness from wrist TRANSLATION jitter over the window. Prefer torso/body-
+        # relative positions when head samples are paired with wrists, so normal
+        # headset/body sway does not falsely mark a stable torso-to-hand pose as shaky.
+        pos = self._body_relative_wrist_positions(side)
+        if pos is None:
+            pos = np.stack(self._wrist_pos[side][-30:]) if self._wrist_pos[side] else None
         std = float(np.linalg.norm(pos.std(axis=0))) if pos is not None and len(pos) > 1 else 0.0
         ok = std < 0.02 and bool(np.isfinite(R).all()) and wrist_ref is not None
         return {"R": R, "ref": None, "op_axes": op, "wrist_ref": wrist_ref,
                 "ok": ok, "std": std, "forward": op[:, 2], "up": op[:, 1]}
+
+    def _body_relative_wrist_positions(self, side: str) -> np.ndarray | None:
+        pos = self._wrist_pos[side][-30:]
+        heads = self._wrist_heads[side][-30:]
+        if not pos or len(pos) != len(heads):
+            return None
+        out = []
+        for p, H in zip(pos, heads, strict=True):
+            op_axes = head_op_axes(H)
+            torso_world = H[:3, 3] + op_axes @ self._torso_from_head
+            out.append(op_axes.T @ (np.asarray(p, dtype=float) - torso_world))
+        return np.stack(out)
 
     # Back-compat thin wrappers
     def compute(self, side: str) -> np.ndarray | None:

@@ -1,16 +1,20 @@
-"""The teleop engine: per-side arm + hand controllers, with a startup CALIBRATION
-phase. On connect the operator stands with both arms hanging at their sides,
-relaxed, palms rolled inward — mirroring the robot's frozen ragdoll-hang rest pose
-(`neutral_q`, see docs/RESTING_POSE.md) — and holds it for `vr.calib_seconds`. We
-measure the operator's body frame (from the HEAD) and the resting wrist orientation,
-and align each arm's headset→base rotation + wrist correspondence to it. During
-calibration the arms hold their rest pose (fingers may still track). After it, the
-arms follow the operator.
+"""The teleop engine: per-side arm + hand controllers.
+
+The arm mapping is CALIBRATION-FREE in the default body-relative mode: positions
+are torso→wrist vectors in body axes, and orientation is the wrist rotation since
+clutch-engage mapped to the corresponding robot-world axes (see ClutchMapper).
+`vr.calib_seconds` therefore defaults to 0 and the arms follow as soon as a hand
+is tracked + engaged.
+
+Setting `vr.calib_seconds > 0` enables the optional legacy startup STILLNESS hold
+(operator stands arms at sides for N seconds). It measures the operator's body
+frame from the head pose, which only steers arm motion when `vr.body_relative`
+is explicitly disabled for diagnostics; otherwise it is a stillness/quality gate.
 
 `calib_status` is published every tick for the in-headset visual (vr/vuer_source):
 the operator can SEE the countdown and when to stop holding still.
 
-Sink = anything with set_arm(side, q) / set_hand(side, joints_deg): the sim world
+Sink = anything with set_arm(side, q) / set_hand(side, joints_deg): Unity render
 now, the hardware drivers later.
 """
 from __future__ import annotations
@@ -18,8 +22,8 @@ from __future__ import annotations
 from .arms.arm_control import ArmController
 from .config import SIDES
 from .hands.hand_control import HandController
-from .vr.calibrate import Calibrator
-from .vr.frames import VRFrame
+from .vr.calibrate import Calibrator, R_base_from_body, body_relative_hand_sample
+from .vr.frames import HandSample, VRFrame
 
 
 class TeleopEngine:
@@ -29,8 +33,10 @@ class TeleopEngine:
         self.arm = {s: ArmController(rig, s) for s in SIDES}
         self.hand = {s: HandController(rig, s) for s in SIDES}
         self.calibrator = Calibrator(rig)
-        self.calib_s = float(rig.get("vr", {}).get("calib_seconds", 5.0))
+        self.calib_s = float(rig.get("vr", {}).get("calib_seconds", 0.0))
         self.calibrated = self.calib_s <= 0
+        self.body_relative = bool(rig.get("vr", {}).get("body_relative", True))
+        self.torso_from_head = rig.get("vr", {}).get("torso_from_head", [0.0, -0.35, 0.0])
         self._calib_t0 = None
         self._prompted = False
         self._done_t = None
@@ -41,6 +47,8 @@ class TeleopEngine:
             self.calib_status = {"active": True, "phase": "wait", "progress": 0.0,
                                  "remaining": self.calib_s, "left": False, "right": False,
                                  "msg": "DROP YOUR ARMS TO YOUR SIDES"}
+        elif self.body_relative:
+            self._set_body_relative_mapping()
 
     def tick(self, frame: VRFrame | None, engaged: dict[str, bool], t: float) -> None:
         if not self.calibrated:
@@ -52,8 +60,17 @@ class TeleopEngine:
                 self.calib_status = None
         for s in SIDES:
             hs = frame.hands.get(s) if frame else None
-            self.sink.set_arm(s, self.arm[s].update(hs, engaged.get(s, False), t))
+            self.sink.set_arm(s, self.arm[s].update(self._arm_hand_sample(hs, frame), engaged.get(s, False), t))
             self.sink.set_hand(s, self.hand[s].update(hs, t))
+
+    def _set_body_relative_mapping(self) -> None:
+        for s in SIDES:
+            self.arm[s].mapper.set_R(R_base_from_body(self.rig["arms"][s]["base_quat"]))
+
+    def _arm_hand_sample(self, hs: HandSample | None, frame: VRFrame | None) -> HandSample | None:
+        if not self.body_relative:
+            return hs
+        return body_relative_hand_sample(hs, frame.head if frame else None, self.torso_from_head)
 
     def _calibration_tick(self, frame: VRFrame | None, t: float) -> None:
         """Collect resting-stance samples; hold arms at the rest pose; fingers track."""
@@ -96,9 +113,8 @@ class TeleopEngine:
                     print(f"[calib] {s}: NOT tracked — using default frame.", flush=True)
                     allok = False
                     continue
-                self.arm[s].mapper.set_R(r["R"])
-                self.arm[s].set_ref_frame(r["ref"])
-                self.arm[s].set_ori_calib(r.get("wrist_ref"), r.get("op_axes"))
+                self.arm[s].mapper.set_R(R_base_from_body(self.rig["arms"][s]["base_quat"])
+                                         if self.body_relative else r["R"])
                 allok = allok and r["ok"]
                 tag = "OK" if r["ok"] else "SHAKY (hold stiller & recalibrate)"
                 print(f"[calib] {s}: {tag} | stillness={r['std']*1000:.0f}mm "

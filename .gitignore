@@ -11,8 +11,20 @@ key.pem
 *.log
 recordings/
 .vr_url
+*.rrd
+# orbit_viz browser-viz calibration (per-machine runtime state)
+config/viz_calib.json
 # Generated artifacts (synthetic harness GIFs, telemetry dumps, etc.)
 out/
 *.gif
 *.parquet
 .pytest_cache/
+
+# Unity generated project state
+unity/TeleopRenderer/Library/
+unity/TeleopRenderer/Temp/
+unity/TeleopRenderer/Obj/
+unity/TeleopRenderer/Logs/
+unity/TeleopRenderer/UserSettings/
+unity/TeleopRenderer/Build/
+unity/TeleopRenderer/Builds/

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Public HTTPS tunnel to the local Vuer server (works on ANY network, incl.
 # isolated campus Wi-Fi). Start this ONCE and leave it running; bookmark the URL
-# on the Quest. Then run the sim with `--vr vuer --http` (restart it freely; the
-# URL stays the same). No account needed.
+# on the Quest. Then run `run_teleop --vr vuer` (restart it freely; the URL stays
+# the same). No account needed.
 #
 # Shows ONLY the link (cloudflared's log spam is hidden) and saves it to
 # .vr_url so you can always retrieve it:   cat ~/Developer/bimanual-teleop/.vr_url
@@ -19,7 +19,8 @@ cloudflared tunnel --url http://localhost:8012 --protocol http2 --edge-ip-versio
     printf '%s\n' "$url" > .vr_url
     printf '\n=========================================================\n'
     printf '  OPEN THIS ON THE QUEST 3 BROWSER (and bookmark it):\n\n      %s\n\n' "$url"
-    printf '  (also saved to .vr_url — leave this terminal running)\n'
+    printf '  Then run: uv run python -m bimanual_teleop.launch.run_teleop --vr vuer --clutch gesture\n'
+    printf '  (URL also saved to .vr_url — leave this terminal running)\n'
     printf '=========================================================\n\n'
   elif printf '%s' "$line" | grep -qE 'ERR |error|failed|fatal'; then
     printf 'tunnel: %s\n' "$line"      # surface problems, hide the rest of the noise

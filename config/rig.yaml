@@ -1,10 +1,10 @@
 # Physical + control configuration for the bimanual humanoid teleop rig.
 #
-# COORDINATE FRAME (sim/world): +x right, +y forward, +z up. The torso sits at
-# `torso.pos`; each arm's YAM base is mounted at a shoulder frame relative to the
-# torso. Hand mount + arm-base orientations are PLACEHOLDERS tuned for a plausible
-# layout — dial `mount_euler` / `hand_euler` / `neutral_q` in the viewer to match
-# your real aluminium frame (tools/frame_check.py + sim/sim_world.py --pose).
+# COORDINATE FRAME (robot world): +Z up, +Y operator/robot right, and -X forward.
+# This matches vr.frames.WEBXR_TO_WORLD: WebXR +x(right)->world +Y,
+# +y(up)->world +Z, and -z(forward)->world -X. Each YAM base pose below is in this
+# world frame; the runtime maps headset/body-relative wrist displacement into each
+# arm's base frame before IK.
 
 # The real rig: an AgileX Ranger 60x60 stand carrying two 5-DoF i2rt YAM arms
 # (the 6th DoF is replaced by the ORCA hand mount). Geometry is from a friend's
@@ -13,7 +13,7 @@ stand:
   pos: [0.0, 0.0, 0.2475]       # lifts the AgileX frame so its feet sit on z=0
 
 arms:
-  # 5-DoF YAM. base_pos/base_quat (quat = w x y z) place the arm base on the
+  # 6-DoF YAM. base_pos/base_quat (quat = w x y z) place the arm base on the
   # stand's Y-face plates; hand_pos/hand_euler are the measured flange→ORCA-hand
   # transform; neutral_q is the home pose (j1=±90° → arms face forward, world −X).
   left:
@@ -40,7 +40,7 @@ hands:
   right: { model_name: orcahand_right }
 
 control:
-  arm_hz: 120        # sim IK/control rate (real YAM CAN loop target: 200-250 on Linux)
+  arm_hz: 120        # headless IK/control rate (real YAM CAN loop target: 200-250 on Linux)
   hand_hz: 60        # finger retarget rate
   vr_hz: 72          # expected Quest stream rate
 
@@ -56,17 +56,20 @@ ik:
   soft_margin: [1.4, 1.0, 1.4, 1.4, 1.5, 1.7]   # 6 joints (j6 = wrist roll)
   # Human-plausible ELBOW (j3) floor: j3 bends both ways from its straightest (home),
   # but only +j3 is anatomical flexion; below this it swings the forearm outward into
-  # the dislocated-looking "overextension". Tune live in run_sim with the o/p keys.
+  # the dislocated-looking "overextension". Validate with scripts/run_synthetic.py
+  # and the Unity render stream before hardware sessions.
   elbow_min: 0.20
   solver: daqp
 
 mapping:
   # Relative + clutch SE(3): on engage, anchor current controller & EE poses;
   # while engaged, EE target = anchor_ee ∘ scaled(relative controller motion).
+  # Orientation uses the SAME body→world axis map as translation (calibration-free):
+  # rotate your hand about a body axis and the EE rotates about the matching world axis.
   pos_scale: 1.0
-  abs_orientation: true   # align EE orientation to absolute wrist orientation (OpenTeleVision style)
-  # R_base_from_vr: rotation (euler xyz, rad) mapping headset/world axes -> arm base axes.
-  # Mirrored about the sagittal plane for the two arms. TUNE with frame_check.
+  # Legacy manual mapper trim (euler xyz, rad). In body_relative mode the runtime
+  # installs the measured body->base mapping at calibration time; leave these at zero
+  # unless you explicitly disable body_relative for diagnostics.
   r_base_from_vr_euler:
     left:  [0.0, 0.0, 0.0]
     right: [0.0, 0.0, 0.0]
@@ -85,7 +88,11 @@ safety:
 
 vr:
   transport: fake     # 'fake' (synthetic, no headset) or 'vuer' (real Quest WebXR)
-  calib_seconds: 5.0  # on connect: ARMS DOWN at your sides, palms inward (matches robot rest) — measures your frame from the head pose
+  render_endpoint: tcp://127.0.0.1:8101       # ZMQ/msgpack render.state stream
+  unity_json_endpoint: tcp://127.0.0.1:8102   # plain TCP newline JSON for Unity
+  body_relative: true # arm IK sees wrist relative to current head/body frame, not raw XR-world hand position
+  torso_from_head: [0.0, -0.35, 0.0] # body-frame torso proxy from headset: right, up, forward (m)
+  calib_seconds: 0.0  # arm mapping is calibration-free; >0 re-enables the optional legacy startup stillness hold (only steers arms when body_relative is false)
   cross_gap: 0.05     # min world-Y gap each hand keeps from center (anti-overlap guard, metres)
   cert_file: cert.pem
   key_file: key.pem

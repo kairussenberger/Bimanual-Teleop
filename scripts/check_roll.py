@@ -4,10 +4,11 @@ twist from the Quest and measure whether it is a CLEAN single-axis roll — the 
 the orientation mapping must turn into a J6 move.
 
 The synthetic harness already proved the IK realises a pure tool-axis roll on j6.
-This checks the OTHER half on real hardware: is the operator's pronation/supination
-arriving as a coherent roll about one axis (good input), or is it noisy/multi-axis
-(which would scramble the mapping regardless of R_align)? It also records the session
-(replayable) so the mapping can be debugged offline.
+This checks the OTHER half on real hardware in the same body-relative frame used by
+arm control: is the operator's pronation/supination arriving as a coherent roll
+about one axis (good input), or is it noisy/multi-axis (which would scramble the
+mapping regardless of R_align)? It also records the session (replayable) so the
+mapping can be debugged offline.
 
     uv run python scripts/check_roll.py                      # 12 s, right hand
     uv run python scripts/check_roll.py --hand left --seconds 15 --save recordings/roll.npz
@@ -25,9 +26,35 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from bimanual_teleop.config import load_rig                      # noqa: E402
+from bimanual_teleop.vr.calibrate import head_op_axes            # noqa: E402
 from bimanual_teleop.vr.frames import rotvec                     # noqa: E402
 from bimanual_teleop.vr.ingest import make_source               # noqa: E402
 from bimanual_teleop.vr.replay import SessionRecorder           # noqa: E402
+
+
+def _head_ok(head) -> bool:
+    if head is None:
+        return False
+    try:
+        return not np.allclose(np.asarray(head, float).reshape(4, 4), np.eye(4))
+    except (TypeError, ValueError):
+        return False
+
+
+def _body_relative_wrist_rotation(frame, hand: str) -> np.ndarray | None:
+    """Wrist orientation expressed in the operator body frame.
+
+    The roll diagnostic must not accept a tracked hand without a valid headset pose,
+    because that would silently fall back to raw room/source-frame wrist rotation.
+    """
+    if frame is None or not _head_ok(frame.head):
+        return None
+    h = frame.hands.get(hand)
+    if h is None or not h.tracked:
+        return None
+    H = np.asarray(frame.head, float).reshape(4, 4)
+    W = np.asarray(h.wrist, float).reshape(4, 4)
+    return head_op_axes(H).T @ W[:3, :3]
 
 
 def main() -> int:
@@ -45,23 +72,23 @@ def main() -> int:
 
     # Wait for the hand to actually start tracking, so donning time doesn't matter.
     print(f"[check_roll] put the headset ON, controllers DOWN, {args.hand} hand in view. "
-          f"Waiting up to {args.wait:.0f}s for tracking...", flush=True)
+          f"Waiting up to {args.wait:.0f}s for head + hand tracking...", flush=True)
     w0 = time.monotonic()
     while time.monotonic() - w0 < args.wait:
         f = src.latest()
-        if f is not None and (h := f.hands.get(args.hand)) is not None and h.tracked:
+        if _body_relative_wrist_rotation(f, args.hand) is not None:
             break
         time.sleep(0.05)
     else:
-        print(f"  no {args.hand}-hand tracking within {args.wait:.0f}s — is the headset ON "
-              f"your face with controllers down? (stream needs it worn)")
+        print(f"  no valid head + {args.hand}-hand tracking within {args.wait:.0f}s — is the "
+              f"headset ON your face with controllers down? (body-relative analysis needs it worn)")
         src.stop()
         return 1
     print(f"[check_roll] TRACKING — now TWIST your {args.hand.upper()} wrist back and forth "
           f"for {args.seconds:.0f}s (doorknob)...", flush=True)
 
     rec = SessionRecorder()
-    Rs: list[np.ndarray] = []        # deduped wrist rotation matrices (WebXR frame)
+    Rs: list[np.ndarray] = []        # deduped wrist rotation matrices (operator body frame)
     t0 = time.monotonic()
     lastR = None
     n_tracked = 0
@@ -70,10 +97,9 @@ def main() -> int:
             f = src.latest()
             if f is not None:
                 rec.add(f, {"left": True, "right": True}, time.monotonic() - t0)
-                h = f.hands.get(args.hand)
-                if h is not None and h.tracked:
+                R = _body_relative_wrist_rotation(f, args.hand)
+                if R is not None:
                     n_tracked += 1
-                    R = np.asarray(h.wrist, float)[:3, :3]
                     if lastR is None or not np.allclose(R, lastR, atol=1e-4):
                         Rs.append(R)
                         lastR = R
@@ -125,8 +151,10 @@ def main() -> int:
     clean = on_frac > 0.85 and roll_range > 0.6
     print(f"\n  {'CLEAN SINGLE-AXIS ROLL ✓ — good mapping input' if clean else 'NOISY / MULTI-AXIS — roll input itself is messy'}")
     if clean:
-        print("  => the roll SIGNAL is good. If the robot still rolls wrong, it is R_align/"
-              "calibration (frames), which the synthetic J6 test already cleared for the IK.")
+        print("  => the roll SIGNAL is good. If the robot still rolls wrong, replay the saved\n"
+              "     session through the mapping scorer + local 3D viewer (no headset needed):\n"
+              "       uv run python scripts/analyze_session.py <session.npz>\n"
+              "       uv run python -m bimanual_teleop.launch.run_teleop --vr replay <session.npz> --viz")
     return 0 if clean else 1
 
 

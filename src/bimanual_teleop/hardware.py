@@ -1,5 +1,5 @@
-"""HardwareSink: the real-robot backend behind the same set_arm/set_hand seam the
-sim world exposes, so TeleopEngine drives either unchanged.
+"""HardwareSink: the real-robot backend behind the same set_arm/set_hand interface
+as RenderSink, so TeleopEngine drives visualization or hardware unchanged.
 
 NOTE: this is the synchronous, single-process bring-up sink. For production the
 arms want a dedicated ~250 Hz CAN loop per side (separate process / SCHED_FIFO),

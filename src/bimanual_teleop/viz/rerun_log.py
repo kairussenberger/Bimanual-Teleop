@@ -1,12 +1,14 @@
-"""Rerun telemetry backbone (spec Section 6B) — the live 3D + time-series dashboard.
+"""Rerun telemetry backbone — optional live 3D + time-series dashboard.
 
-Rerun is the right tool for "what is MuJoCo actually doing": log timestamped 3D
-transforms (every named frame), scalar time-series (pose error, loop rate, solve
-time, joint margins) and text/status, then scrub and replay.
+Rerun is useful for inspecting the headless Python runtime: timestamped 3D
+transforms (operator body frame, commanded/achieved EE frames), scalar time-series
+(pose error, loop rate, solve time, joint margins), and text/status that can be
+scrubbed and replayed.
 
 This is an OPTIONAL dependency (`uv sync --extra telemetry`). The logger degrades to
 a silent no-op when `rerun` is not installed or when constructed with enabled=False,
-so the core sim and headless CI never need it. Import is lazy for the same reason.
+so the core teleop runtime and headless CI never need it. Import is lazy for the
+same reason.
 
     rr_log = RerunLogger(spawn=True)          # opens the Rerun viewer
     rr_log.set_time(t)
@@ -26,7 +28,7 @@ class RerunLogger:
     """Thin wrapper over the Rerun SDK that is safe to call unconditionally."""
 
     def __init__(self, app_id: str = "bimanual_teleop", *, spawn: bool = False,
-                 enabled: bool = True):
+                 enabled: bool = True, save_path: str | None = None):
         self.rr = None
         if not enabled:
             return
@@ -37,6 +39,8 @@ class RerunLogger:
         self.rr = rr
         try:
             rr.init(app_id, spawn=spawn)
+            if save_path:                       # log to a .rrd file (open later with `rerun FILE`)
+                rr.save(str(save_path))
         except Exception:
             self.rr = None                      # init failed -> stay a no-op
 
@@ -77,6 +81,32 @@ class RerunLogger:
         if self.rr is None:
             return
         self.rr.log(path, self.rr.Points3D(np.asarray(pts, float).reshape(-1, 3), radii=radius))
+
+    def linestrip(self, path: str, pts, radius: float = 0.004, color=None) -> None:
+        """Log a polyline (e.g. an arm link chain) as one LineStrips3D entity."""
+        if self.rr is None:
+            return
+        pts = np.asarray(pts, float).reshape(-1, 3)
+        kw = {"radii": radius}
+        if color is not None:
+            kw["colors"] = np.asarray(color, dtype=np.uint8)
+        self.rr.log(path, self.rr.LineStrips3D([pts], **kw))
+
+    def arrow(self, path: str, origin, vector, color=(255, 200, 40)) -> None:
+        if self.rr is None:
+            return
+        self.rr.log(path, self.rr.Arrows3D(origins=[np.asarray(origin, float)],
+                                           vectors=[np.asarray(vector, float)],
+                                           colors=np.asarray(color, dtype=np.uint8)))
+
+    def clear(self, path: str, *, recursive: bool = True) -> None:
+        """Remove an entity (e.g. the command marker on clutch release)."""
+        if self.rr is None:
+            return
+        try:
+            self.rr.log(path, self.rr.Clear(recursive=recursive))
+        except Exception:
+            pass
 
     # --- scalars / text ------------------------------------------------------ #
     def scalar(self, path: str, value: float) -> None:

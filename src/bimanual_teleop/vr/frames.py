@@ -4,16 +4,17 @@ arm end-effector target.
 Mapping (per OpenTeleVision / Quest2ROS best practice): on clutch *engage* we
 latch the current wrist pose and the current EE pose as anchors. While engaged,
 the EE target is the anchored EE pose composed with the operator's wrist motion
-*relative* to its anchor — translation scaled and rotated into the arm base frame
-by a constant `R_base_from_vr`, orientation either absolute-aligned or relative.
-Because it's relative, absolute origin offsets cancel, so frame calibration only
-needs that one rotation (mirrored per arm about the sagittal plane).
+*relative* to its anchor. Translation AND rotation use the same change of basis:
+the wrist delta, measured in the ctrl frame, is re-expressed into the arm base
+frame by the one constant `R_base_from_vr` and applied about the anchor. Because
+it's relative, absolute origin offsets cancel — there is NO stance calibration:
+rotate your hand about a body axis and the EE rotates about the corresponding
+robot-world axis, from any starting pose. See ClutchMapper.target().
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import mink
 import numpy as np
 
 
@@ -28,7 +29,7 @@ class HandSample:
 @dataclass
 class VRFrame:
     stamp: float = 0.0
-    head: np.ndarray = field(default_factory=lambda: np.eye(4))
+    head: np.ndarray | None = field(default_factory=lambda: np.eye(4))
     hands: dict[str, HandSample] = field(default_factory=dict)
 
 
@@ -161,77 +162,136 @@ def rotvec(R: np.ndarray) -> np.ndarray:
     return ang / (2.0 * np.sin(ang)) * v
 
 
-def mat_to_se3(T: np.ndarray) -> mink.SE3:
-    T = np.asarray(T, dtype=float).reshape(4, 4)
-    return mink.SE3.from_rotation_and_translation(
-        mink.SO3.from_matrix(T[:3, :3]), T[:3, 3])
+# --------------------------------------------------------------------------- #
+# SE3 / SO3 — minimal pose types with the mink API surface this repo uses,
+# decoupled from any IK backend. The Pinocchio/pink solver is touched ONLY at the
+# task boundary in arms/ik.py via SE3.to_pin()/from_pin(); everything else (clutch
+# mapper, controllers, tests, synthetic harness) speaks these classes. Replaces the
+# former dependency on mink.SE3 / mink.SO3.
+# --------------------------------------------------------------------------- #
+class SO3:
+    __slots__ = ("_R",)
+
+    def __init__(self, R: np.ndarray):
+        self._R = np.asarray(R, dtype=float).reshape(3, 3)
+
+    @classmethod
+    def from_matrix(cls, R: np.ndarray) -> "SO3":
+        return cls(R)
+
+    def as_matrix(self) -> np.ndarray:
+        return self._R.copy()
+
+    def inverse(self) -> "SO3":
+        return SO3(self._R.T)
+
+
+class SE3:
+    __slots__ = ("_R", "_t")
+
+    def __init__(self, R: np.ndarray, t: np.ndarray):
+        self._R = np.asarray(R, dtype=float).reshape(3, 3)
+        self._t = np.asarray(t, dtype=float).reshape(3)
+
+    @classmethod
+    def from_rotation_and_translation(cls, rotation, translation) -> "SE3":
+        R = rotation.as_matrix() if isinstance(rotation, SO3) else np.asarray(rotation, float).reshape(3, 3)
+        return cls(R, translation)
+
+    @classmethod
+    def from_translation(cls, translation) -> "SE3":
+        return cls(np.eye(3), translation)
+
+    @classmethod
+    def from_matrix(cls, T: np.ndarray) -> "SE3":
+        T = np.asarray(T, dtype=float).reshape(4, 4)
+        return cls(T[:3, :3], T[:3, 3])
+
+    @classmethod
+    def from_pin(cls, M) -> "SE3":
+        """Build from a pinocchio.SE3 (rotation/translation are attributes there)."""
+        return cls(np.asarray(M.rotation), np.asarray(M.translation))
+
+    def to_pin(self):
+        """Convert to pinocchio.SE3 for a pink FrameTask target (the only IK-backend touchpoint)."""
+        import pinocchio as pin
+        return pin.SE3(self._R.copy(), self._t.copy())
+
+    def rotation(self) -> SO3:
+        return SO3(self._R)
+
+    def translation(self) -> np.ndarray:
+        return self._t.copy()
+
+    def as_matrix(self) -> np.ndarray:
+        T = np.eye(4)
+        T[:3, :3] = self._R
+        T[:3, 3] = self._t
+        return T
+
+
+def mat_to_se3(T: np.ndarray) -> SE3:
+    return SE3.from_matrix(T)
 
 
 class ClutchMapper:
-    """Relative+clutch wrist→EE mapping for one arm."""
+    """Relative+clutch wrist→EE mapping for one arm.
 
-    def __init__(self, R_base_from_vr: np.ndarray, pos_scale: float = 1.0,
-                 abs_orientation: bool = True):
+    One contract for translation AND rotation: the wrist motion since engage,
+    measured in the ctrl frame, is re-expressed into the arm base frame by the
+    single constant `R` and applied about the anchor. No stance calibration.
+    """
+
+    def __init__(self, R_base_from_vr: np.ndarray, pos_scale: float = 1.0):
         self.R = np.asarray(R_base_from_vr, dtype=float).reshape(3, 3)
         self.scale = float(pos_scale)
-        # NOTE: target() is ALWAYS relative (invariant #1: never absolute). This flag
-        # and the `_R_off` latched in engage() are kept for API/back-compat but are
-        # currently INERT — orientation maps through the calibrated correspondence P.
-        # Don't trust this flag to change behaviour without wiring it into target() +
-        # a test that asserts the two modes differ for a post-engage twist.
-        self.abs_orientation = bool(abs_orientation)
-        self.anchor_ctrl: mink.SE3 | None = None
-        self.anchor_ee: mink.SE3 | None = None
-        self._R_off: np.ndarray | None = None   # orientation anchor so engage is continuous
-        # Orientation correspondence (hand-LOCAL → EE-LOCAL). Calibration sets this so
-        # a wrist twist maps to the EE roll axis (j6). Identity = no remap.
-        self.P = np.eye(3)
-        # Debug: when True, the EE holds the anchor orientation and ONLY position
-        # maps — lets you verify the 3 translation axes in isolation before adding
-        # orientation. Set via the --pos-only studio flag.
-        self.freeze_ori = False
+        self.anchor_ctrl: SE3 | None = None
+        self.anchor_ee: SE3 | None = None
 
     def set_R(self, R: np.ndarray) -> None:
-        """Replace the headset→base rotation (e.g. after calibration)."""
+        """Replace the ctrl→base rotation (legacy stance calibration only)."""
         self.R = np.asarray(R, dtype=float).reshape(3, 3)
         self.release()   # force a fresh anchor on next engage
-
-    def set_P(self, P: np.ndarray) -> None:
-        """Replace the hand-local→EE-local orientation correspondence (calibration)."""
-        self.P = np.asarray(P, dtype=float).reshape(3, 3)
-        self.release()
 
     @property
     def engaged(self) -> bool:
         return self.anchor_ctrl is not None
 
-    def engage(self, ctrl: mink.SE3, ee: mink.SE3) -> None:
+    def engage(self, ctrl: SE3, ee: SE3) -> None:
         """Latch position AND orientation anchors on the clutch rising edge, so the
         target equals the current EE pose at the engage instant (no jump)."""
         self.anchor_ctrl = ctrl
         self.anchor_ee = ee
-        # _R_off is latched for a would-be absolute mode but is currently INERT
-        # (target() never reads it — see the __init__ note; the mapping is relative).
-        self._R_off = ee.rotation().as_matrix() @ (self.R @ ctrl.rotation().as_matrix()).T
 
     def release(self) -> None:
         self.anchor_ctrl = None
         self.anchor_ee = None
-        self._R_off = None
 
-    def target(self, ctrl: mink.SE3) -> mink.SE3:
-        """EE target (arm base frame) for the current wrist pose while engaged."""
+    def target(self, ctrl: SE3) -> SE3:
+        """EE target (arm base frame) for the current wrist pose while engaged.
+
+        Orientation: the wrist rotation SINCE engage as a left/world-frame delta in
+        the ctrl frame (D = R_now·R_anchorᵀ), conjugated into the arm base frame by
+        the SAME `R` that maps translations, then applied to the EE anchor in the
+        base frame:
+
+            R_target = (R · D · Rᵀ) · R_ee_anchor
+
+        So a hand rotation of θ about a ctrl-frame axis `a` becomes an EE rotation
+        of θ about the base-frame axis `R·a` — roll→roll, pitch→pitch, yaw→yaw,
+        from ANY starting pose, with no stance/orientation calibration. Continuous
+        at engage (D=I ⇒ target=anchor). In body-relative mode both the ctrl basis
+        (head_op_axes) and `R` (R_base_from_body) carry one reflection (det −1);
+        the conjugation cancels them, so the mapped rotation is proper and lands on
+        the physically corresponding world axis (tests/test_frames.py asserts this
+        on the real per-side base_quat). The earlier hand-local correspondence
+        (anchorᵀ·now conjugated by a calibrated P) is gone: it depended on a 5 s
+        arms-at-sides hold that, done imperfectly, scrambled every rotation axis —
+        measured at ~145° median axis error on a real Quest session.
+        """
         assert self.anchor_ctrl is not None and self.anchor_ee is not None
         dp_vr = ctrl.translation() - self.anchor_ctrl.translation()
         p = self.anchor_ee.translation() + self.scale * (self.R @ dp_vr)
-        if self.freeze_ori:                       # position-only debug: hold rest orientation
-            return mink.SE3.from_rotation_and_translation(self.anchor_ee.rotation(), p)
-        # Orientation: the operator's wrist rotation SINCE engage, measured in the
-        # hand-local frame, re-expressed into the EE frame via the calibrated
-        # correspondence P, then applied to the EE anchor. Continuous at engage
-        # (dR=I ⇒ Rt=anchor_ee), and a twist about the hand's pointing axis maps to
-        # the EE roll axis (j6) because P aligns the two frames. The old "absolute"
-        # form let R cancel (RᵀR=I), so calibration couldn't steer orientation at all.
-        dR = self.anchor_ctrl.rotation().inverse().as_matrix() @ ctrl.rotation().as_matrix()
-        Rt = self.anchor_ee.rotation().as_matrix() @ (self.P @ dR @ self.P.T)
-        return mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(Rt), p)
+        dR = ctrl.rotation().as_matrix() @ self.anchor_ctrl.rotation().as_matrix().T
+        Rt = (self.R @ dR @ self.R.T) @ self.anchor_ee.rotation().as_matrix()
+        return SE3.from_rotation_and_translation(SO3.from_matrix(Rt), p)

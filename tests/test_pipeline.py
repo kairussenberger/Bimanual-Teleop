@@ -9,19 +9,29 @@ import time
 import numpy as np
 
 
+def _free_tcp_port() -> int:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
 def test_joint_name_map_roundtrip():
-    from bimanual_teleop.hands.joint_map import orca_to_sim_short, sim_short_to_orca
+    from bimanual_teleop.hands.joint_map import ORCA_JOINT_ORDER, orca_to_sim_short, sim_short_to_orca
     for j in ["wrist", "thumb_cmc", "thumb_abd", "thumb_mcp", "thumb_dip",
               "index_abd", "index_mcp", "index_pip", "pinky_pip", "middle_mcp"]:
         assert sim_short_to_orca(orca_to_sim_short(j)) == j
     assert orca_to_sim_short("thumb_dip") == "t-pip"      # the tricky one
     assert orca_to_sim_short("index_mcp") == "i-mcp"
+    assert len(ORCA_JOINT_ORDER) == 17
+    assert ORCA_JOINT_ORDER[0] == "wrist"
 
 
 def test_quest_retarget_open_to_fist():
     from bimanual_teleop.hands.quest_retarget import quest_to_orca, synthetic_webxr_hand
-    from bimanual_teleop.hands.joint_map import load_hand_config
+    from bimanual_teleop.hands.joint_map import ORCA_JOINT_ORDER, load_hand_config
     from bimanual_teleop.hands import retarget_core as rc
+    from bimanual_teleop.render_sink import ordered_hand_state
     neutral, roms = load_hand_config("orcahand_right")
     op = rc.clamp_to_rom(quest_to_orca(synthetic_webxr_hand(0.0), neutral, mirror=True), roms)
     fist = rc.clamp_to_rom(quest_to_orca(synthetic_webxr_hand(1.0), neutral, mirror=True), roms)
@@ -32,25 +42,31 @@ def test_quest_retarget_open_to_fist():
     for j, v in fist.items():
         lo, hi = roms[j]
         assert lo - 1e-6 <= v <= hi + 1e-6
+    op_render = ordered_hand_state(op)
+    fist_render = ordered_hand_state(fist)
+    assert op_render["names"] == ORCA_JOINT_ORDER
+    assert len(fist_render["q"]) == len(ORCA_JOINT_ORDER)
+    curl_idx = [ORCA_JOINT_ORDER.index(k) for k in ("index_mcp", "index_pip", "middle_mcp", "middle_pip")]
+    assert np.mean([fist_render["q"][i] for i in curl_idx]) > np.mean([op_render["q"][i] for i in curl_idx]) + 20
 
 
 def test_clutch_mapper_relative_zero_motion_on_engage():
-    import mink
+    from bimanual_teleop.vr.frames import SE3, SO3
     from bimanual_teleop.vr.frames import ClutchMapper
-    m = ClutchMapper(np.eye(3), pos_scale=1.0, abs_orientation=False)
-    ee = mink.SE3.from_translation(np.array([0.3, 0.1, 0.5]))
-    ctrl = mink.SE3.from_translation(np.array([1.0, 2.0, 3.0]))
+    m = ClutchMapper(np.eye(3), pos_scale=1.0)
+    ee = SE3.from_translation(np.array([0.3, 0.1, 0.5]))
+    ctrl = SE3.from_translation(np.array([1.0, 2.0, 3.0]))
     m.engage(ctrl, ee)
     # no controller motion -> target == anchored EE
     tgt = m.target(ctrl)
     assert np.allclose(tgt.translation(), ee.translation(), atol=1e-9)
     # +5cm controller x -> +5cm EE x (scale 1, identity R)
-    moved = mink.SE3.from_translation(np.array([1.05, 2.0, 3.0]))
+    moved = SE3.from_translation(np.array([1.05, 2.0, 3.0]))
     assert np.allclose(m.target(moved).translation(), ee.translation() + [0.05, 0, 0], atol=1e-9)
 
 
 def test_arm_ik_converges():
-    import mink
+    from bimanual_teleop.vr.frames import SE3, SO3
     from bimanual_teleop.arms.ik import ArmIK
     from bimanual_teleop.config import load_rig
     ik = ArmIK(load_rig(), "left")
@@ -59,7 +75,7 @@ def test_arm_ik_converges():
     # the arms-down home. (A target further DOWN sits near the hanging arm's reach
     # boundary, where any IK is stiff; that's not what this convergence test checks.)
     tgt = T0.translation() + np.array([0.07, 0.0, 0.05])
-    target = mink.SE3.from_rotation_and_translation(ik.fk_ee().rotation(), tgt)
+    target = SE3.from_rotation_and_translation(ik.fk_ee().rotation(), tgt)
     for _ in range(300):
         ik.solve(target)
     assert np.linalg.norm(ik.fk_wrist().translation() - tgt) < 5e-3
@@ -85,7 +101,7 @@ def test_supervisor_estop_and_staleness():
 def test_zmq_loopback_latest_value():
     from bimanual_teleop.bus.zmq_io import Publisher, LatestSub
     from bimanual_teleop.bus import topics
-    ep = "tcp://127.0.0.1:5799"
+    ep = f"tcp://127.0.0.1:{_free_tcp_port()}"
     pub = Publisher(ep)
     sub = LatestSub(ep, [topics.ARM_CMD])
     time.sleep(0.2)  # PUB/SUB slow-joiner
@@ -116,20 +132,537 @@ def test_clutch_release_disengages_immediately():
     assert not sup.update(fr2, 100.05)["left"]   # immediate, NOT after hold_s
 
 
-def test_abs_orientation_no_engage_snap():
-    """abs-orientation mode must equal the anchored EE pose at the engage instant
+def test_orientation_continuous_at_engage():
+    """The target must equal the anchored EE pose at the engage instant
     (the ~157° wrist snap the review caught)."""
-    import mink
+    from bimanual_teleop.vr.frames import SE3, SO3
     from bimanual_teleop.vr.frames import ClutchMapper, euler_to_R
     R_ee = euler_to_R([0.5, -0.3, 0.8])
     R_ctrl = euler_to_R([1.1, 0.2, -0.4])
-    ee = mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(R_ee), np.array([0.3, 0.1, 0.5]))
-    ctrl = mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(R_ctrl), np.array([1.0, 2.0, 3.0]))
-    m = ClutchMapper(euler_to_R([0.2, 0.0, 1.5]), pos_scale=1.0, abs_orientation=True)
+    ee = SE3.from_rotation_and_translation(SO3.from_matrix(R_ee), np.array([0.3, 0.1, 0.5]))
+    ctrl = SE3.from_rotation_and_translation(SO3.from_matrix(R_ctrl), np.array([1.0, 2.0, 3.0]))
+    m = ClutchMapper(euler_to_R([0.2, 0.0, 1.5]), pos_scale=1.0)
     m.engage(ctrl, ee)
     tgt = m.target(ctrl)
     assert np.allclose(tgt.rotation().as_matrix(), R_ee, atol=1e-9)
     assert np.allclose(tgt.translation(), ee.translation(), atol=1e-9)
+
+
+def test_body_relative_wrist_cancels_head_translation_and_yaw():
+    """The arm-control wrist pose is the operator torso -> wrist vector, not
+    raw XR-world wrist position. Moving/yawing the head with the hand fixed relative
+    to the body must produce the same controller pose."""
+    from bimanual_teleop.vr.calibrate import body_relative_hand_sample, head_op_axes
+    from bimanual_teleop.vr.frames import HandSample, euler_to_R
+
+    def pose(R, p):
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = p
+        return T
+
+    torso_from_head = np.array([0.0, -0.35, 0.0])
+    torso_to_wrist = np.array([0.25, 0.27, 0.55])  # right, up, forward from torso
+    head_to_wrist = torso_from_head + torso_to_wrist
+
+    head0 = pose(np.eye(3), [0.0, 1.6, 0.0])
+    op0 = head_op_axes(head0)
+    hand0 = HandSample(tracked=True, wrist=pose(op0, head0[:3, 3] + op0 @ head_to_wrist))
+
+    head1 = pose(euler_to_R([0.0, 0.7, 0.0]), [0.4, 1.7, -0.2])
+    op1 = head_op_axes(head1)
+    hand1 = HandSample(tracked=True, wrist=pose(op1, head1[:3, 3] + op1 @ head_to_wrist))
+
+    rel0 = body_relative_hand_sample(hand0, head0, torso_from_head)
+    rel1 = body_relative_hand_sample(hand1, head1, torso_from_head)
+    assert np.allclose(rel0.wrist[:3, 3], torso_to_wrist, atol=1e-9)
+    assert np.allclose(rel1.wrist[:3, 3], torso_to_wrist, atol=1e-9)
+    assert np.allclose(rel0.wrist[:3, :3], rel1.wrist[:3, :3], atol=1e-9)
+
+
+def test_calibration_stillness_uses_body_relative_wrist_positions():
+    """Calibration quality should not fail just because the headset/torso shifts
+    while the wrist is stable relative to the torso."""
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.vr.calibrate import Calibrator, head_op_axes
+
+    rig = load_rig()
+    rig["vr"]["torso_from_head"] = [0.0, -0.35, 0.0]
+    cal = Calibrator(rig)
+    torso = np.asarray(rig["vr"]["torso_from_head"], dtype=float)
+    torso_to_wrist = np.array([0.22, 0.30, 0.45])
+    lm = synthetic_webxr_hand(0.0)
+    for i in range(12):
+        head = np.eye(4)
+        head[:3, 3] = [0.003 * i, 1.6 + 0.002 * i, -0.004 * i]
+        op = head_op_axes(head)
+        wrist = np.eye(4)
+        wrist[:3, :3] = op
+        wrist[:3, 3] = head[:3, 3] + op @ (torso + torso_to_wrist)
+        cal.add("left", lm, wrist, head)
+    res = cal.result("left")
+    assert res is not None
+    assert res["ok"] is True
+    assert res["std"] < 1e-9
+
+
+def test_calibration_ignores_non_finite_pose_samples():
+    """Bad custom/replay matrices must not poison calibration averages with NaNs."""
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.vr.calibrate import Calibrator
+
+    cal = Calibrator(load_rig())
+    lm = synthetic_webxr_hand(0.0)
+    head = np.eye(4)
+    wrist = np.eye(4)
+
+    bad_lm = lm.copy()
+    bad_lm[0, 0] = float("nan")
+    cal.add("left", bad_lm, wrist, head)
+    assert cal.count("left") == 1  # finite wrist still counts; bad landmarks ignored
+    assert len(cal._samples["left"]) == 0
+
+    bad_wrist = wrist.copy()
+    bad_wrist[0, 3] = float("inf")
+    for _ in range(10):
+        cal.add("right", lm, bad_wrist, head)
+    assert len(cal._wrists["right"]) == 0
+    assert cal.result("right") is None
+
+
+def test_body_relative_wrist_orientation_delta_is_head_invariant():
+    """Wrist orientation is also expressed in body coordinates: the same hand-local
+    twist should produce the same controller delta even if the head pose changes."""
+    from bimanual_teleop.vr.calibrate import body_relative_hand_sample, head_op_axes
+    from bimanual_teleop.vr.frames import HandSample, euler_to_R
+
+    def pose(R, p):
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = p
+        return T
+
+    def ctrl_delta(head):
+        op = head_op_axes(head)
+        hand_rel = euler_to_R([0.2, -0.4, 0.7])
+        twist = euler_to_R([0.0, 0.0, 0.6])  # hand-local twist
+        ref = HandSample(tracked=True, wrist=pose(op @ hand_rel, head[:3, 3] + op @ [0.2, 0.0, 0.5]))
+        now = HandSample(tracked=True, wrist=pose(op @ hand_rel @ twist, head[:3, 3] + op @ [0.2, 0.0, 0.5]))
+        cref = body_relative_hand_sample(ref, head).wrist[:3, :3]
+        cnow = body_relative_hand_sample(now, head).wrist[:3, :3]
+        return cref, cref.T @ cnow, twist
+
+    cref0, d0, twist = ctrl_delta(pose(np.eye(3), [0.0, 1.6, 0.0]))
+    cref1, d1, _ = ctrl_delta(pose(euler_to_R([0.0, 0.8, 0.0]), [0.4, 1.7, -0.2]))
+    assert np.allclose(cref0, cref1, atol=1e-8)
+    assert np.allclose(d0, twist, atol=1e-8)
+    assert np.allclose(d1, twist, atol=1e-8)
+
+
+def test_body_relative_arm_sample_requires_head_pose():
+    """A tracked hand without a head pose must not fall back to raw XR-world arm
+    motion in body-relative mode; that would reintroduce blind direction-vector
+    control. Finger landmarks remain available to the hand retargeter."""
+    from bimanual_teleop.engine import TeleopEngine
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.vr.frames import HandSample, VRFrame
+
+    class Sink:
+        def set_arm(self, side, q):
+            pass
+
+        def set_hand(self, side, joints):
+            pass
+
+    rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0
+    rig["vr"]["body_relative"] = True
+    engine = TeleopEngine(rig, Sink())
+
+    wrist = np.eye(4)
+    wrist[:3, 3] = [2.0, 2.0, -1.0]  # deliberately far raw XR-world pose
+    landmarks = synthetic_webxr_hand(0.4)
+    raw = HandSample(tracked=True, wrist=wrist, landmarks=landmarks, pinch=0.7)
+    frame = VRFrame(stamp=0.0, head=None, hands={"left": raw})
+
+    arm_sample = engine._arm_hand_sample(raw, frame)
+    assert arm_sample is not None
+    assert arm_sample.tracked is False
+    assert np.allclose(arm_sample.wrist, raw.wrist)
+    assert arm_sample.landmarks is landmarks
+    assert raw.tracked is True
+
+
+def test_body_relative_arm_sample_rejects_non_finite_pose_matrices():
+    """A malformed custom/replay source must fail closed at the body-relative
+    boundary even if live transports normally filter bad matrices upstream."""
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.vr.calibrate import body_relative_hand_sample
+    from bimanual_teleop.vr.frames import HandSample
+
+    lm = synthetic_webxr_hand(0.2)
+    wrist = np.eye(4)
+    head = np.eye(4)
+
+    bad_head = head.copy()
+    bad_head[0, 3] = float("nan")
+    out = body_relative_hand_sample(HandSample(tracked=True, wrist=wrist, landmarks=lm), bad_head)
+    assert out.tracked is False
+    assert out.landmarks is lm
+    assert np.all(np.isfinite(out.wrist))
+
+    bad_wrist = wrist.copy()
+    bad_wrist[1, 3] = float("inf")
+    out = body_relative_hand_sample(HandSample(tracked=True, wrist=bad_wrist, landmarks=lm), head)
+    assert out.tracked is False
+    assert out.landmarks is lm
+    assert np.all(np.isfinite(out.wrist))
+
+    out = body_relative_hand_sample(
+        HandSample(tracked=True, wrist=wrist, landmarks=lm),
+        head,
+        torso_from_head=[0.0, float("nan"), 0.0],
+    )
+    assert out.tracked is False
+    assert out.landmarks is lm
+    assert np.all(np.isfinite(out.wrist))
+
+
+def test_engine_body_motion_does_not_drive_arm_but_hand_lift_does():
+    """End-to-end through TeleopEngine: translating/yawing the headset while the
+    torso-to-wrist vector is fixed should hold the arm target; lifting the wrist
+    relative to the torso should move the arm."""
+    from bimanual_teleop.config import load_rig, SIDES
+    from bimanual_teleop.engine import TeleopEngine
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.vr.calibrate import head_op_axes
+    from bimanual_teleop.vr.frames import HandSample, VRFrame, euler_to_R
+
+    class Sink:
+        def __init__(self):
+            self.arm = {}
+            self.hand = {}
+
+        def set_arm(self, side, q):
+            self.arm[side] = np.asarray(q)
+
+        def set_hand(self, side, joints):
+            self.hand[side] = dict(joints)
+
+    def pose(R, p):
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = p
+        return T
+
+    def frame(head, torso_to_wrist):
+        op = head_op_axes(head)
+        torso = np.array([0.0, -0.35, 0.0])
+        wrist = pose(op, head[:3, 3] + op @ (torso + torso_to_wrist))
+        hands = {s: HandSample(tracked=True, wrist=wrist.copy(), landmarks=synthetic_webxr_hand(0.0)) for s in SIDES}
+        return VRFrame(stamp=0.0, head=head, hands=hands)
+
+    rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0
+    rig["vr"]["body_relative"] = True
+    rig["vr"]["torso_from_head"] = [0.0, -0.35, 0.0]
+    engine = TeleopEngine(rig, Sink())
+    engaged = {s: True for s in SIDES}
+
+    torso_to_wrist = np.array([0.22, 0.28, 0.48])
+    head0 = pose(np.eye(3), [0.0, 1.6, 0.0])
+    engine.tick(frame(head0, torso_to_wrist), engaged, 0.0)
+    p0 = engine.arm["left"].ik.fk_wrist().translation()
+
+    head_moved = pose(euler_to_R([0.0, 0.6, 0.0]), [0.35, 1.72, -0.25])
+    for i in range(1, 40):
+        engine.tick(frame(head_moved, torso_to_wrist), engaged, i / 120.0)
+    p_same = engine.arm["left"].ik.fk_wrist().translation()
+    assert np.linalg.norm(p_same - p0) < 1e-4
+
+    lifted = torso_to_wrist + np.array([0.0, 0.16, 0.0])
+    for i in range(40, 160):
+        engine.tick(frame(head_moved, lifted), engaged, i / 120.0)
+    p_lift = engine.arm["left"].ik.fk_wrist().translation()
+    assert np.linalg.norm(p_lift - p_same) > 0.02
+
+
+def test_calibration_completion_installs_body_relative_mapping():
+    """After the rest-pose calibration window, body-relative mode should use the
+    body-frame base mapping that runtime wrist poses are expressed in."""
+    from bimanual_teleop.config import load_rig, SIDES
+    from bimanual_teleop.engine import TeleopEngine
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.vr.calibrate import R_base_from_body, head_op_axes
+    from bimanual_teleop.vr.frames import HandSample, VRFrame
+
+    class Sink:
+        def set_arm(self, side, q):
+            pass
+
+        def set_hand(self, side, joints):
+            pass
+
+    rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0.08
+    rig["vr"]["body_relative"] = True
+    engine = TeleopEngine(rig, Sink())
+    head = np.eye(4)
+    head[:3, 3] = [0.0, 1.6, 0.0]
+    op = head_op_axes(head)
+    torso = np.asarray(rig["vr"]["torso_from_head"], dtype=float)
+    torso_to_wrist = {"left": np.array([-0.25, 0.25, 0.45]),
+                      "right": np.array([0.25, 0.25, 0.45])}
+    lm = synthetic_webxr_hand(0.0)
+    for i in range(10):
+        hands = {}
+        for s in SIDES:
+            wrist = np.eye(4)
+            wrist[:3, :3] = op
+            wrist[:3, 3] = head[:3, 3] + op @ (torso + torso_to_wrist[s])
+            hands[s] = HandSample(tracked=True, wrist=wrist, landmarks=lm)
+        engine.tick(VRFrame(stamp=i / 100.0, head=head, hands=hands),
+                    {s: False for s in SIDES}, i / 100.0)
+    assert engine.calibrated is True
+    for s in SIDES:
+        assert np.allclose(engine.arm[s].mapper.R, R_base_from_body(rig["arms"][s]["base_quat"]))
+
+
+def test_operator_debug_state_exposes_invariant_torso_vectors():
+    """The Unity-visible op.hands.*.wrist_body payload must expose the same
+    body-relative vector as arm control: invariant to head motion, changing on lift."""
+    from bimanual_teleop.config import SIDES
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.render_sink import operator_debug_state
+    from bimanual_teleop.vr.calibrate import head_op_axes
+    from bimanual_teleop.vr.frames import HandSample, VRFrame, euler_to_R
+
+    def pose(R, p):
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = p
+        return T
+
+    def frame(head, torso_from_head, torso_to_wrist):
+        op = head_op_axes(head)
+        wrist = pose(op, head[:3, 3] + op @ (torso_from_head + torso_to_wrist))
+        hands = {s: HandSample(tracked=True, wrist=wrist.copy(), landmarks=synthetic_webxr_hand(0.0)) for s in SIDES}
+        return VRFrame(stamp=0.0, head=head, hands=hands)
+
+    torso = np.array([0.0, -0.35, 0.0])
+    torso_to_wrist = np.array([0.2, 0.3, 0.5])
+    head0 = pose(np.eye(3), [0.0, 1.6, 0.0])
+    head1 = pose(euler_to_R([0.0, 0.5, 0.0]), [0.3, 1.7, -0.2])
+    op0 = operator_debug_state(frame(head0, torso, torso_to_wrist), torso)
+    op1 = operator_debug_state(frame(head1, torso, torso_to_wrist), torso)
+    assert np.allclose(op0["hands"]["left"]["wrist_body"], torso_to_wrist, atol=1e-9)
+    assert np.allclose(op1["hands"]["left"]["wrist_body"], torso_to_wrist, atol=1e-9)
+    lifted = operator_debug_state(frame(head1, torso, torso_to_wrist + [0.0, 0.1, 0.0]), torso)
+    assert lifted["hands"]["left"]["wrist_body"][1] > op1["hands"]["left"]["wrist_body"][1] + 0.09
+
+
+def test_operator_debug_state_no_frame_is_fixed_shape_untracked():
+    from bimanual_teleop.config import SIDES
+    from bimanual_teleop.render_sink import operator_debug_state
+
+    op = operator_debug_state(None, [0.0, -0.35, 0.0])
+    assert op["torso_from_head"] == [0.0, -0.35, 0.0]
+    assert op["head_pos"] is None
+    assert op["torso_pos"] is None
+    assert set(op["hands"]) == set(SIDES)
+    for side in SIDES:
+        assert op["hands"][side] == {"tracked": False, "wrist_body": None, "raw_wrist": None}
+
+
+def test_operator_debug_state_rejects_non_finite_pose_matrices():
+    """Unity overlay state should fail closed per hand/head without leaking NaN
+    into the strict JSON render stream."""
+    import json
+    from bimanual_teleop.config import SIDES
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.render_sink import operator_debug_state
+    from bimanual_teleop.vr.frames import HandSample, VRFrame
+
+    head = np.eye(4)
+    good_wrist = np.eye(4)
+    good_wrist[:3, 3] = [0.2, 1.3, -0.4]
+    bad_wrist = good_wrist.copy()
+    bad_wrist[0, 3] = float("nan")
+    frame = VRFrame(
+        stamp=0.0,
+        head=head,
+        hands={
+            "left": HandSample(tracked=True, wrist=bad_wrist, landmarks=synthetic_webxr_hand(0.0)),
+            "right": HandSample(tracked=True, wrist=good_wrist, landmarks=synthetic_webxr_hand(0.0)),
+        },
+    )
+
+    op = operator_debug_state(frame, [0.0, -0.35, 0.0])
+    assert op["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None}
+    assert op["hands"]["right"]["tracked"] is True
+    assert len(op["hands"]["right"]["wrist_body"]) == 3
+    json.dumps(op, allow_nan=False)
+
+    bad_head = head.copy()
+    bad_head[1, 3] = float("inf")
+    op = operator_debug_state(VRFrame(stamp=0.0, head=bad_head, hands=frame.hands), [0.0, -0.35, 0.0])
+    assert op["head_pos"] is None
+    assert op["torso_pos"] is None
+    assert set(op["hands"]) == set(SIDES)
+    assert op["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None}
+    assert op["hands"]["right"]["tracked"] is False
+    assert op["hands"]["right"]["wrist_body"] is None
+    assert op["hands"]["right"]["raw_wrist"] == [0.2, 1.3, -0.4]
+    json.dumps(op, allow_nan=False)
+
+
+def test_operator_debug_state_uses_finite_default_for_bad_torso_config():
+    """A bad rig torso offset should not leak non-finite values into Unity JSON."""
+    import json
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.render_sink import operator_debug_state
+    from bimanual_teleop.vr.frames import HandSample, VRFrame
+
+    head = np.eye(4)
+    head[:3, 3] = [0.0, 1.6, 0.0]
+    wrist = np.eye(4)
+    wrist[:3, 3] = [0.2, 1.2, -0.4]
+    frame = VRFrame(
+        stamp=0.0,
+        head=head,
+        hands={"right": HandSample(tracked=True, wrist=wrist, landmarks=synthetic_webxr_hand(0.0))},
+    )
+
+    op = operator_debug_state(frame, [float("nan"), -0.35, 0.0])
+    assert op["torso_from_head"] == [0.0, -0.35, 0.0]
+    assert op["hands"]["right"]["tracked"] is True
+    assert len(op["hands"]["right"]["wrist_body"]) == 3
+    json.dumps(op, allow_nan=False)
+
+
+def test_render_state_marks_body_relative_hand_untracked_without_head_pose():
+    """Unity status/overlay must not report valid torso-to-wrist motion when the
+    headset pose is missing, even if the hand sensor still reports tracked fingers."""
+    import uuid
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.engine import TeleopEngine
+    from bimanual_teleop.hands.joint_map import ORCA_JOINT_ORDER
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.render_sink import RenderSink, operator_debug_state
+    from bimanual_teleop.vr.frames import HandSample, VRFrame
+
+    rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0
+    rig["vr"]["body_relative"] = True
+    rig["vr"]["unity_json_endpoint"] = None
+    endpoint = f"inproc://missing-head-{uuid.uuid4()}"
+    sink = RenderSink(rig, endpoint=endpoint)
+    engine = TeleopEngine(rig, sink)
+
+    wrist = np.eye(4)
+    wrist[:3, 3] = [2.0, 1.8, -1.0]
+    frame = VRFrame(
+        stamp=0.0,
+        head=None,
+        hands={"left": HandSample(tracked=True, wrist=wrist, landmarks=synthetic_webxr_hand(0.5))},
+    )
+
+    op = operator_debug_state(frame, rig["vr"]["torso_from_head"])
+    assert op["head_pos"] is None
+    assert op["torso_pos"] is None
+    assert op["hands"]["left"]["tracked"] is False
+    assert op["hands"]["left"]["wrist_body"] is None
+    assert op["hands"]["left"]["raw_wrist"] == [2.0, 1.8, -1.0]
+
+    engine.tick(frame, {"left": True, "right": True}, 0.0)
+    state = sink.build_state(engine, frame, {"left": True, "right": True}, 60.0, 0.0)
+    assert state["status"]["tracked"]["left"] is False
+    assert state["arms"]["left"]["cmd_pos"] is None
+    assert state["arms"]["left"]["cmd_quat"] is None
+    assert state["op"]["hands"]["left"]["wrist_body"] is None
+    assert state["hand_render"]["left"]["names"] == ORCA_JOINT_ORDER
+    assert len(state["hand_render"]["left"]["q"]) == len(ORCA_JOINT_ORDER)
+    sink.close()
+
+
+def test_render_state_marks_body_relative_hand_untracked_with_non_finite_wrist():
+    """Unity status must match the body-relative vector gate, not just the raw
+    hand-tracking flag. A tracked hand with a bad wrist pose cannot drive arm
+    motion or an operator wrist overlay."""
+    import uuid
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.engine import TeleopEngine
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.render_sink import RenderSink
+    from bimanual_teleop.vr.frames import HandSample, VRFrame
+
+    rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0
+    rig["vr"]["body_relative"] = True
+    rig["vr"]["unity_json_endpoint"] = None
+    endpoint = f"inproc://bad-wrist-{uuid.uuid4()}"
+    sink = RenderSink(rig, endpoint=endpoint)
+    engine = TeleopEngine(rig, sink)
+
+    head = np.eye(4)
+    head[:3, 3] = [0.0, 1.6, 0.0]
+    wrist = np.eye(4)
+    wrist[:3, 3] = [0.2, 1.2, -0.4]
+    wrist[0, 3] = float("nan")
+    frame = VRFrame(
+        stamp=0.0,
+        head=head,
+        hands={"left": HandSample(tracked=True, wrist=wrist, landmarks=synthetic_webxr_hand(0.5))},
+    )
+
+    engine.tick(frame, {"left": True, "right": True}, 0.0)
+    state = sink.build_state(engine, frame, {"left": True, "right": True}, 60.0, 0.0)
+    assert state["status"]["tracked"]["left"] is False
+    assert state["arms"]["left"]["cmd_pos"] is None
+    assert state["arms"]["left"]["cmd_quat"] is None
+    assert state["op"]["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None}
+    sink.close()
+
+
+def test_render_state_non_body_relative_status_does_not_fabricate_operator_vector():
+    """If body-relative mode is disabled, a hand can still be reported as tracked
+    for legacy arm-control semantics, but Unity's torso-vector overlay must not
+    invent wrist_body without a headset pose."""
+    import uuid
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.engine import TeleopEngine
+    from bimanual_teleop.hands.quest_retarget import synthetic_webxr_hand
+    from bimanual_teleop.render_sink import RenderSink
+    from bimanual_teleop.vr.frames import HandSample, VRFrame
+
+    rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0
+    rig["vr"]["body_relative"] = False
+    rig["vr"]["unity_json_endpoint"] = None
+    endpoint = f"inproc://non-body-relative-missing-head-{uuid.uuid4()}"
+    sink = RenderSink(rig, endpoint=endpoint)
+    engine = TeleopEngine(rig, sink)
+
+    wrist = np.eye(4)
+    wrist[:3, 3] = [1.2, 1.1, -0.4]
+    frame = VRFrame(
+        stamp=0.0,
+        head=None,
+        hands={"left": HandSample(tracked=True, wrist=wrist, landmarks=synthetic_webxr_hand(0.2))},
+    )
+
+    engine.tick(frame, {"left": True, "right": True}, 0.0)
+    state = sink.build_state(engine, frame, {"left": True, "right": True}, 60.0, 0.0)
+    assert state["status"]["tracked"]["left"] is True
+    assert state["op"]["head_pos"] is None
+    assert state["op"]["torso_pos"] is None
+    assert state["op"]["hands"]["left"]["tracked"] is False
+    assert state["op"]["hands"]["left"]["wrist_body"] is None
+    assert state["op"]["hands"]["left"]["raw_wrist"] == [1.2, 1.1, -0.4]
+    sink.close()
 
 
 def test_calibration_aligns_forward_and_no_cross():
@@ -166,108 +699,206 @@ def test_calibration_aligns_forward_and_no_cross():
         assert (y <= 0.001) if side == "left" else (y >= -0.001)
 
 
-def test_end_to_end_sim_tick():
-    """Fake VR → engine → sim moves the arms (EE position changes)."""
+def test_end_to_end_render_tick():
+    """Fake VR → engine → RenderSink: the engine moves the arms (EE FK changes) and
+    publishes a well-formed render.state that ZMQ and Unity TCP subscribers receive."""
+    import json
+    import socket
     from bimanual_teleop.config import load_rig, SIDES
     from bimanual_teleop.engine import TeleopEngine
-    from bimanual_teleop.sim.sim_world import SimWorld
+    from bimanual_teleop.render_sink import RenderSink
+    from bimanual_teleop.bus.zmq_io import LatestSub
+    from bimanual_teleop.bus import topics
     from bimanual_teleop.vr.ingest import FakeVRSource
     rig = load_rig()
     rig["vr"]["calib_seconds"] = 0          # skip the calibration phase for this motion test
-    world = SimWorld(rig)
-    engine = TeleopEngine(rig, world)
+    render_port = _free_tcp_port()
+    json_port = _free_tcp_port()
+    rig["vr"]["render_endpoint"] = f"tcp://127.0.0.1:{render_port}"
+    rig["vr"]["unity_json_endpoint"] = f"tcp://127.0.0.1:{json_port}"
+    sink = RenderSink(rig)
+    engine = TeleopEngine(rig, sink)
+    sub = LatestSub(f"tcp://127.0.0.1:{render_port}", topics.RENDER_STATE)
+    tcp = socket.create_connection(("127.0.0.1", json_port), timeout=1.0)
+    tcp.settimeout(1.0)
     src = FakeVRSource()
-    ee0 = world.ee_pose("left")[:3, 3].copy()
+    time.sleep(0.2)  # PUB/SUB slow-joiner
+    ee0 = engine.arm["left"].ik.fk_ee().translation().copy()
     for i in range(120):
         t = i / 60.0
-        engine.tick(src.frame_at(t), {s: True for s in SIDES}, t)
-        world.step(2)
-    assert np.linalg.norm(world.ee_pose("left")[:3, 3] - ee0) > 0.02
+        frame = src.frame_at(t)
+        eng = {s: True for s in SIDES}
+        engine.tick(frame, eng, t)
+        sink.publish(engine, frame, eng, 60.0, t)
+    sub.poll()
+    st = sub.get(topics.RENDER_STATE)
+    assert st is not None and len(st["arms"]["left"]["q"]) == 6
+    assert len(st["arms"]["left"]["link_pos"]) == 24
+    assert len(st["arms"]["left"]["cmd_pos"]) == 3
+    assert np.all(np.isfinite(st["arms"]["left"]["cmd_pos"]))
+    assert np.linalg.norm(np.asarray(st["arms"]["left"]["cmd_pos"]) - np.asarray(st["arms"]["left"]["ee_pos"])) < 0.25
+    assert len(st["hand_render"]["left"]["names"]) == 17
+    assert len(st["hand_render"]["left"]["q"]) == 17
+    assert st["status"]["engaged"]["left"] is True
+    raw = tcp.makefile("r").readline()
+    js = json.loads(raw)
+    assert js["v"] == topics.SCHEMA_VERSION
+    assert len(js["arms"]["right"]["q"]) == 6
+    assert len(js["arms"]["right"]["link_pos"]) == 24
+    assert len(js["arms"]["right"]["cmd_pos"]) == 3
+    assert np.all(np.isfinite(js["arms"]["right"]["cmd_pos"]))
+    assert len(js["hand_render"]["right"]["names"]) == 17
+    assert len(js["hand_render"]["right"]["q"]) == 17
+    assert js["status"]["tracked"]["right"] is True
+    assert js["op"]["torso_from_head"] == rig["vr"]["torso_from_head"]
+    assert js["op"]["hands"]["left"]["tracked"] is True
+    assert len(js["op"]["hands"]["left"]["wrist_body"]) == 3
+    assert np.linalg.norm(engine.arm["left"].ik.fk_ee().translation() - ee0) > 0.02
+    tcp.close(); sink.close(); sub.close()
 
 
-def test_overlay_geom_counts_and_guard():
-    """Overlay primitives append the right number of geoms and never overflow."""
-    import mujoco
-    from bimanual_teleop.viz import overlay
-    m = mujoco.MjModel.from_xml_string("<mujoco/>")
-    scn = mujoco.MjvScene(m, maxgeom=1000); scn.ngeom = 0
-    overlay.triad(scn, [0, 0, 0], np.eye(3));                    assert scn.ngeom == 3
-    overlay.sphere(scn, [0, 0, 0], 0.01, (1, 1, 1, 1));         assert scn.ngeom == 4
-    overlay.connector(scn, [0, 0, 0], [0, 0, 1], 0.01, (1, 1, 1, 1)); assert scn.ngeom == 5
-    overlay.skeleton(scn, np.zeros((25, 3)))                     # 24 bones + 25 joints
-    assert scn.ngeom == 5 + len(overlay.HAND_BONES) + 25
-    n = scn.ngeom
-    overlay.arrow(scn, [0, 0, 0], [0, 0, 0], 0.1, 0.01, (1, 1, 1, 1))  # zero dir = no-op
-    assert scn.ngeom == n
-    full = mujoco.MjvScene(m, maxgeom=2); full.ngeom = 0
-    overlay.skeleton(full, np.zeros((25, 3)))                    # must respect maxgeom
-    assert full.ngeom <= 2
+def test_unity_render_fixture_matches_python_publisher():
+    """The Unity Editor validation fixture must be generated from RenderSink's
+    current render-state builder, not a hand-maintained JSON sample."""
+    import importlib.util
+    import json
+    from pathlib import Path
+    from bimanual_teleop.bus import topics
+    from bimanual_teleop.config import SIDES
+    from bimanual_teleop.hands.joint_map import ORCA_JOINT_ORDER
+
+    repo = Path(__file__).resolve().parents[1]
+    script = repo / "scripts" / "update_unity_fixture.py"
+    spec = importlib.util.spec_from_file_location("update_unity_fixture", script)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    fixture_path = repo / "unity" / "TeleopRenderer" / "Assets" / "Editor" / "render_state_sample.json"
+    actual = fixture_path.read_text(encoding="utf-8")
+    generated = mod.normalized_text(mod.make_fixture())
+    assert actual == generated
+
+    sample = json.loads(actual)
+    assert sample["v"] == topics.SCHEMA_VERSION
+    assert set(sample["arms"]) == set(SIDES)
+    assert set(sample["hand_render"]) == set(SIDES)
+    for side in SIDES:
+        assert len(sample["arms"][side]["link_pos"]) == 24
+        assert len(sample["arms"][side]["q"]) == 6
+        assert sample["hand_render"][side]["names"] == ORCA_JOINT_ORDER
+        assert len(sample["op"]["hands"][side]["wrist_body"]) == 3
 
 
-def test_studio_canonical_hand_axes():
-    """The synthetic operator's reference hand reads forward=−z (fingers), up=+y."""
-    from bimanual_teleop.tools import mapping_studio as ms
-    from bimanual_teleop.vr.calibrate import operator_axes
-    ax = operator_axes(ms._canonical_hand())     # columns [right, up, forward]
-    assert ax[2, 2] < -0.9      # forward's z-component ≈ −1
-    assert ax[1, 1] > 0.9       # up's y-component ≈ +1
-
-
-def test_studio_synthetic_hand_consistent_with_wrist():
-    """Synthetic landmarks must ride the wrist orientation (the reason the studio
-    has its own driver instead of FakeVRSource): hand_frame(lm) == R_wrist · hand_frame(ref)."""
-    from bimanual_teleop.tools import mapping_studio as ms
-    from bimanual_teleop.hands.quest_retarget import hand_frame
-    _, Hc = hand_frame(ms._CANON)
-    for t in (0.7, 1.9, 3.3):
-        h = ms._synthetic_frame(t).hands["left"]
-        R = np.asarray(h.wrist, float)[:3, :3]
-        _, Hf = hand_frame(h.landmarks)
-        assert np.allclose(Hf, R @ Hc, atol=1e-6)
-
-
-def test_studio_tuner_retunes_mapping():
-    """Live knobs nudge R_base_from_vr + pos_scale on both arms; reset restores."""
-    from bimanual_teleop.config import load_rig
-    from bimanual_teleop.engine import TeleopEngine
-    from bimanual_teleop.sim.sim_world import SimWorld
-    from bimanual_teleop.tools.mapping_studio import Tuner
-    rig = load_rig(); rig["vr"]["calib_seconds"] = 0
-    world = SimWorld(rig); engine = TeleopEngine(rig, world)
-    tn = Tuner(rig, engine); tn.apply()
-    R0 = engine.arm["left"].mapper.R.copy()
-    tn.key(ord("I")); tn.key(ord("I")); tn.apply()              # +pitch tweak
-    assert not np.allclose(engine.arm["left"].mapper.R, R0)
-    tn.key(ord("0")); tn.apply()                                # reset
-    assert np.allclose(engine.arm["left"].mapper.R, R0, atol=1e-9)
-    tn.key(ord("=")); tn.apply()                                # scale up one step
-    assert abs(engine.arm["left"].mapper.scale
-               - (rig["mapping"]["pos_scale"] + Tuner.SCALE_STEP)) < 1e-9
-
-
-def test_studio_tuner_reengages_after_retune():
-    """Retuning the frame mid-session (set_R → release) must re-anchor on the next
-    engaged tick, not crash on the missing clutch anchor (the live-knob bug the
-    adversarial review caught)."""
+def test_render_sink_survives_unity_json_port_busy():
+    """Unity JSON is useful but non-critical: if that port is already held by an
+    editor/debug process, teleop must keep running and still publish ZMQ state."""
+    import socket
+    import time
     from bimanual_teleop.config import load_rig, SIDES
     from bimanual_teleop.engine import TeleopEngine
-    from bimanual_teleop.sim.sim_world import SimWorld
-    from bimanual_teleop.tools.mapping_studio import Tuner, _synthetic_frame
-    rig = load_rig(); rig["vr"]["calib_seconds"] = 0
-    world = SimWorld(rig); engine = TeleopEngine(rig, world)
-    tn = Tuner(rig, engine)
-    for i in range(20):                                   # engage + follow
+    from bimanual_teleop.render_sink import RenderSink
+    from bimanual_teleop.bus.zmq_io import LatestSub
+    from bimanual_teleop.bus import topics
+    from bimanual_teleop.vr.ingest import FakeVRSource
+
+    busy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    busy.bind(("127.0.0.1", 0))
+    busy_port = int(busy.getsockname()[1])
+    busy.listen()
+
+    rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0
+    render_port = _free_tcp_port()
+    rig["vr"]["render_endpoint"] = f"tcp://127.0.0.1:{render_port}"
+    rig["vr"]["unity_json_endpoint"] = f"tcp://127.0.0.1:{busy_port}"
+    sink = RenderSink(rig)
+    assert sink.json_enabled is False
+    engine = TeleopEngine(rig, sink)
+    sub = LatestSub(f"tcp://127.0.0.1:{render_port}", topics.RENDER_STATE)
+    src = FakeVRSource()
+    time.sleep(0.2)
+    eng = {s: True for s in SIDES}
+    for i in range(10):
         t = i / 60.0
-        engine.tick(_synthetic_frame(t), {s: True for s in SIDES}, t); world.step(1)
-    assert engine.arm["left"].mapper.engaged
-    tn.key(ord("I")); tn.apply()                          # retune → set_R releases clutch
-    assert not engine.arm["left"].mapper.engaged
-    ee0 = world.ee_pose("left")[:3, 3].copy()
-    for i in range(20, 60):                               # must re-anchor, not assert-crash
-        t = i / 60.0
-        engine.tick(_synthetic_frame(t), {s: True for s in SIDES}, t); world.step(1)
-    assert engine.arm["left"].mapper.engaged              # re-anchored
-    assert np.linalg.norm(world.ee_pose("left")[:3, 3] - ee0) > 0.005   # still following
+        frame = src.frame_at(t)
+        engine.tick(frame, eng, t)
+        sink.publish(engine, frame, eng, 60.0, t)
+        time.sleep(0.005)
+    sub.poll()
+    assert sub.get(topics.RENDER_STATE) is not None
+    sink.close(); sub.close(); busy.close()
+
+
+def test_render_sink_survives_zmq_port_busy_with_unity_json_fallback():
+    """If the ZMQ render port is held by a stale process, Unity JSON should still
+    start and receive render states."""
+    import json
+    import socket
+    import time
+    from bimanual_teleop.config import load_rig, SIDES
+    from bimanual_teleop.engine import TeleopEngine
+    from bimanual_teleop.render_sink import RenderSink
+    from bimanual_teleop.vr.ingest import FakeVRSource
+
+    busy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    busy.bind(("127.0.0.1", 0))
+    busy_port = int(busy.getsockname()[1])
+    busy.listen()
+
+    rig = load_rig()
+    rig["vr"]["calib_seconds"] = 0
+    json_port = _free_tcp_port()
+    rig["vr"]["render_endpoint"] = f"tcp://127.0.0.1:{busy_port}"
+    rig["vr"]["unity_json_endpoint"] = f"tcp://127.0.0.1:{json_port}"
+    sink = RenderSink(rig)
+    assert sink.zmq_enabled is False
+    assert sink.json_enabled is True
+    engine = TeleopEngine(rig, sink)
+    tcp = socket.create_connection(("127.0.0.1", json_port), timeout=1.0)
+    tcp.settimeout(1.0)
+    src = FakeVRSource()
+    time.sleep(0.05)
+    frame = src.frame_at(0.0)
+    eng = {s: True for s in SIDES}
+    engine.tick(frame, eng, 0.0)
+    sink.publish(engine, frame, eng, 60.0, 0.0)
+    js = json.loads(tcp.makefile("r").readline())
+    assert js["status"]["tracked"]["left"] is True
+    assert len(js["arms"]["left"]["q"]) == 6
+    tcp.close(); sink.close(); busy.close()
+
+
+def test_unity_json_broadcaster_drops_non_finite_frames():
+    """Unity receives strict JSON only; NaN/Infinity render frames are dropped
+    instead of being serialized as non-standard JavaScript tokens."""
+    import json
+    import socket
+    import time
+    from bimanual_teleop.render_sink import TcpJsonBroadcaster
+
+    port = _free_tcp_port()
+    broadcaster = TcpJsonBroadcaster(f"tcp://127.0.0.1:{port}")
+    tcp = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    tcp.settimeout(0.2)
+    reader = tcp.makefile("r")
+    time.sleep(0.05)
+
+    try:
+        broadcaster.send({"v": 1, "value": 1.0})
+        assert json.loads(reader.readline()) == {"v": 1, "value": 1.0}
+
+        broadcaster.send({"v": 1, "value": float("nan")})
+        try:
+            raw = reader.readline()
+        except socket.timeout:
+            raw = ""
+        assert raw == ""
+    finally:
+        tcp.close()
+        broadcaster.close()
 
 
 def test_orbit_source_unity_to_webxr():
@@ -281,13 +912,102 @@ def test_orbit_source_unity_to_webxr():
     now = time.monotonic()
     src._ingest("hand", "right", hand_msg, now)
     src._ingest("wrist", "right", "relative,0.1,0.2,0.3,0,0,0,1", now)
-    hr = src.latest().hands["right"]
+    f = src.latest()
+    assert f.head is None                                             # no placeholder identity head
+    hr = f.hands["right"]
     assert hr.tracked and hr.landmarks.shape == (25, 3)               # tracked, palm dropped
     assert not np.allclose(hr.landmarks[1], [9.0, 9.0, -9.0])         # the Palm sentinel is gone
     assert np.isclose(hr.landmarks[1, 2], -0.02)                     # orig joint 2, z negated
     assert np.allclose(hr.wrist[:3, 3], [0.1, 0.2, -0.3], atol=1e-6)  # wrist z flipped
-    src._last["right"] = now - 10.0                                  # staleness -> not tracked
+    src._wrist_last["right"] = now - 10.0                            # staleness -> not tracked
     assert not src.latest().hands["right"].tracked
+
+
+def test_orbit_source_tracks_wrist_and_landmark_freshness_separately():
+    """Fresh hand-landmark packets must not keep stale wrist poses tracked, and
+    stale landmarks must not invalidate a fresh wrist pose used for arm control."""
+    import time
+    from bimanual_teleop.vr.orbit_source import OrbitVRSource
+
+    src = OrbitVRSource({"vr": {"orbit_flip": "z", "orbit_adb_reverse": False, "orbit_timeout": 5.0}})
+    pts = np.zeros((26, 3))
+    pts[:, 0] = np.arange(26) * 0.01
+    hand_msg = "relative:" + "|".join(f"{x},{y},{z}" for x, y, z in pts) + ":"
+    now = time.monotonic()
+    src._ingest("hand", "right", hand_msg, now)
+    src._ingest("wrist", "right", "relative,0.1,0.2,0.3,0,0,0,1", now)
+
+    src._wrist_last["right"] = now - 10.0
+    src._lm_last["right"] = now
+    assert src.latest().hands["right"].tracked is False
+
+    src._ingest("wrist", "right", "relative,0.1,0.2,0.3,0,0,0,1", now)
+    src._lm_last["right"] = now - 10.0
+    hand = src.latest().hands["right"]
+    assert hand.tracked is True
+    assert hand.landmarks is None
+    assert hand.pinch == 0.0
+
+
+def test_orbit_source_rejects_malformed_or_non_finite_messages():
+    """ORBIT parser failures must leave hands/head untracked rather than
+    accepting malformed points or non-finite pose values."""
+    import time
+    from bimanual_teleop.vr.orbit_source import OrbitVRSource, _parse_hand, _parse_pose
+
+    assert _parse_hand("relative:1,2|3,4:") is None
+    assert _parse_hand("relative:1,2,nan|3,4,5:") is None
+    assert _parse_pose("relative,0,0,0,0,0,0,0") is None
+    assert _parse_pose("relative,0,0,nan,0,0,0,1") is None
+
+    src = OrbitVRSource({"vr": {"orbit_flip": "z", "orbit_adb_reverse": False, "orbit_timeout": 5.0}})
+    now = time.monotonic()
+    src._ingest("hand", "right", "relative:1,2,nan|3,4,5:", now)
+    src._ingest("wrist", "right", "relative,0.1,0.2,nan,0,0,0,1", now)
+    f = src.latest()
+    assert f.head is None
+    assert f.hands["right"].tracked is False
+
+
+def test_vuer_source_starts_without_placeholder_head_pose():
+    """Before WebXR CAMERA_MOVE arrives, Vuer must expose head=None instead of an
+    identity matrix, so body-relative arm control cannot fabricate torso vectors."""
+    from bimanual_teleop.config import SIDES
+    from bimanual_teleop.vr.vuer_source import VuerVRSource
+
+    src = VuerVRSource({"vr": {}})
+    f = src.latest()
+    assert f is not None
+    assert f.head is None
+    assert set(f.hands) == set(SIDES)
+
+
+def test_vuer_source_rejects_malformed_pose_matrices():
+    """Malformed Vuer hand/camera matrices must fail closed instead of becoming
+    identity poses that body-relative control would treat as real tracking."""
+    from bimanual_teleop.vr.vuer_source import VuerVRSource, _mat4
+
+    assert _mat4([1.0, 2.0]) is None
+    assert _mat4([float("nan")] * 16) is None
+
+    src = VuerVRSource({"vr": {}})
+    bad_hand = [0.0] * (25 * 16)
+    bad_hand[0] = float("nan")
+    src._update_hand("left", bad_hand, {})
+    f = src.latest()
+    assert f.head is None
+    assert f.hands["left"].tracked is False
+
+    good_hand = np.zeros((25, 16), dtype=float)
+    for i in range(25):
+        M = np.eye(4)
+        M[:3, 3] = [0.01 * i, 0.02 * i, -0.03 * i]
+        good_hand[i] = M.reshape(16, order="F")
+    src._update_hand("left", good_hand.reshape(-1).tolist(), {"pinchValue": 0.4})
+    f = src.latest()
+    assert f.hands["left"].tracked is True
+    assert np.allclose(f.hands["left"].wrist, np.eye(4))
+    assert f.hands["left"].pinch == 0.4
 
 
 if __name__ == "__main__":

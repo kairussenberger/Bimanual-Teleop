@@ -1,212 +1,269 @@
-# PROGRESS — headset-independent foundation build
+# Progress
 
-Autonomous run journal (operator away ~1h, could not be asked). Every judgement
-call is recorded here. Work was done on branch **`auto/teleop-foundation`** (not
-`main`) so it's easy to review/merge/revert.
+The repository has been reworked away from the old local MuJoCo simulator toward a
+headless body-relative teleop runtime with a Unity render stream.
 
----
+## 2026-06-10 — Scrambled-Wrist Root Cause Found And Fixed (On Real Quest Data)
 
-## TL;DR for when you're back
+Symptom (reported from live use): hand tracking is good and holding the hands
+forward roughly works, but any wrist rotation makes the robot move about seemingly
+random axes.
 
-- **The repo was NOT greenfield.** It already had a mature, `mink`-based bimanual
-  teleop pipeline under `src/bimanual_teleop/` (frames, two-stage IK, real CAD
-  YAM+ORCA sim models, safety, calibration, viz, 16 passing tests). The goal brief
-  assumed a blank `teleop/teleop/` scaffold (Section 9). **I did not re-scaffold or
-  clobber anything** — that would have destroyed real work (frozen rest pose, real
-  MJCF, ICP-registered bases). I mapped the goal's deliverables onto the existing
-  layout and filled the genuine gaps.
-- The build spec is the repo's own `CLAUDE.md` (its Section 0–10 match the brief's
-  references verbatim). There is no separate `teleop_build_spec.md`.
-- **Definition of done is met (headlessly):**
-  - `uv run pytest` → **52 passed** (was 16; +36 new).
-  - `uv run python scripts/run_synthetic.py` → **ALL trajectories PASS** on both
-    arms (line, circle, pure roll/pitch/yaw): pose error ≤0.72 cm / ≤0°, joint
-    velocity ≤1.6 rad/s (limit 12), no flips, within soft limits, and **pure roll
-    lands on j6**. Writes `out/run_synthetic.gif` overlaying achieved (solid) vs
-    commanded (faint) EE triads at each hand.
+Diagnosis — `scripts/analyze_session.py` (new) replays a recorded session through
+the REAL `TeleopEngine` and grades the commanded motion against the operator's
+motion. On `recordings/roll_right.npz` (real Quest capture of a right-wrist roll):
 
-### Headline technical finding
-The two-stage IK realises a **pure tool-axis roll on j6** to <2° with j1–j5 barely
-moving (tests/test_ik.py + the synthetic harness). So **the IK is sound** — if a
-real wrist roll still fails with the headset on, the bug is in **frames/tracking
-(R_align / calibration)**, NOT in IK or joint limits. That's exactly the isolation
-the spec's Section 7 asks for, now provable on demand.
+- translation mapping: 0.7° median direction error → fine (matches "hands forward
+  works");
+- orientation mapping: **145.5° median world-axis error**, angle magnitude
+  preserved → every rotation came out about the wrong axis;
+- IK tracking: 0.0° — the solver faithfully executed the wrong command (the
+  earlier synthetic-roll finding "IK is sound" confirmed end-to-end);
+- the 5 s stance calibration in that session graded itself SHAKY (33–37 mm) and
+  the stance was not arms-at-sides — and the engine used the result anyway.
 
-## Spec-name → actual-module mapping (Section 9 vs. this repo)
+Root cause: EE orientation went through a hand-local→EE-local correspondence `P`
+built from the startup arms-at-sides hold. The correspondence is only right if the
+operator exactly mirrors the robot's rest stance during calibration; any deviation
+re-labels which hand axis is which and scrambles all commanded rotation axes.
 
-| Spec file (Section 9)     | This repo                                             | Status |
-|---------------------------|------------------------------------------------------|--------|
-| `teleop/frames.py`        | `src/bimanual_teleop/vr/frames.py`                   | extended + tested |
-| `teleop/filters.py`       | `src/bimanual_teleop/filters.py` (NEW, canonical)    | new + tested |
-| `teleop/ik.py`            | `src/bimanual_teleop/arms/ik.py`                     | extended + tested |
-| `teleop/calibration.py`   | `src/bimanual_teleop/vr/calibrate.py`               | pre-existing (UNVERIFIED w/ headset) |
-| `teleop/transport.py`     | `vr/ingest.py` + `vr/vuer_source.py` + `vr/orbit_source.py` | pre-existing |
-| `teleop/control_loop.py`  | `src/bimanual_teleop/engine.py` + `launch/run_sim.py`| pre-existing |
-| `teleop/viz.py`           | `viz/overlay.py` + `viz/rerun_log.py` (NEW)          | overlay pre-existing; rerun new |
-| `teleop/logging_utils.py` | `src/bimanual_teleop/logging_utils.py` (NEW)         | new + tested |
-| `teleop/replay.py`        | `src/bimanual_teleop/vr/replay.py` (NEW)             | new + tested (live capture UNVERIFIED) |
-| `scripts/run_synthetic.py`| `scripts/run_synthetic.py` (NEW)                     | new + tested |
+Fix (`ClutchMapper.target`): orientation now uses the SAME change of basis as
+translation — the wrist rotation since clutch-engage as a left/world-frame delta,
+conjugated into the arm base frame by the one constant `R`, applied about the EE
+anchor. Calibration-free; roll→roll/pitch→pitch/yaw→yaw from any starting pose;
+body-turn invariant. The left-handed `[right,up,forward]` bases (`head_op_axes`,
+`W_AXES`) each carry a reflection and the conjugation cancels them exactly —
+`tests/test_frames.py::test_clutch_orientation_body_relative_real_rig_axes` pins
+this on the real per-side `base_quat`s. Same real recording after the fix: **1.4°
+median axis error (p90 4.6°), angle ratio 0.99**.
 
----
+Consequences folded in:
 
-## Work log (commits on `auto/teleop-foundation`)
+- `vr.calib_seconds` defaults to **0** — no startup ritual; arms follow once
+  tracked + engaged. The stillness hold remains opt-in for legacy
+  `body_relative: false` diagnostics, and the rig contract rejects a nonzero
+  default and the removed knobs (`mapping.abs_orientation`,
+  `mapping.ori_tweak_euler`).
+- Dead machinery removed: `ArmController.set_ori_calib`, `set_ref_frame`,
+  `ArmIK.ee_semantic_frame_local`, mapper `P`/`set_P`/`abs_orientation`/
+  `freeze_ori`/`_R_off`.
+- `run_teleop --viz` (and `--viz-save out.rrd`): local Rerun 3D viewer — both arm
+  link chains, commanded vs achieved EE triads, the operator torso→wrist vector +
+  wrist triad mapped through the SAME body→world axes arm control uses, error and
+  clutch/pinch plots. Works with fake/synthetic/replay/orbit sources; `--vr
+  replay` scrubs the whole session on the Rerun timeline. No Unity, no headset.
+  Requires `uv sync --extra telemetry` (optional dependency, runtime stays lean).
+- README gained "Debugging Without A Headset" + rewrote the mapping section;
+  CLAUDE.md gained the Orientation Mapping Contract.
 
-1. **Dev tooling + journal.** Added `pytest` as a dev dependency group (so the DoD
-   command `uv run pytest` works — it previously failed: pytest wasn't a dep) and
-   `rerun-sdk` as an optional `telemetry` extra. Committed the spec (`CLAUDE.md`)
-   and this journal.
-2. **frames: R_align + change-of-basis (tests first).** Added the Section 3
-   primitives explicitly — `conjugate_rotation(B,dR)=B·dR·Bᵀ` and the quaternion
-   form `change_basis_quat(q,dq)=q·dq·q⁻¹`, plus `R_to_quat`/`quat_mul`/`quat_conj`/
-   `quat_inv`/`quat_from_axis_angle` and an `R_ALIGN` alias for `WEBXR_TO_WORLD`.
-   `tests/test_frames.py` (written first) pins the **+90° roll** invariant: a roll
-   about the hand forward axis → a roll about the robot tool axis and *nothing else*,
-   both via the helper and end-to-end through `ClutchMapper`. The existing relative
-   mapping already satisfied it.
-3. **filters: canonical One-Euro.** The proven webcam-ported One-Euro lived inside
-   `hands/retarget_core`; moved it verbatim to `filters.py` (single source, spec's
-   `filters.py`), re-exported for back-compat, added `OneEuroVecFilter`. Behaviour
-   unchanged (same defaults). `tests/test_filters.py` pins passthrough/no-DC-offset/
-   no-overshoot/higher-beta-less-lag/jitter-attenuation/vec==dict/zero-dt-safety.
-4. **ik: elbow limit + observability + collision hook.** Documented invariant #5
-   (model `jnt_range` + `ConfigurationLimit` + soft limits cap elbow j3
-   hyperextension). Added `limit_margins()`/`within_limits()` for the HUD/tests and
-   an opt-in `collision_pairs=` hook (off by default; standalone arm geoms are
-   visual-only). `tests/test_ik.py` adds the **J6 isolation test**.
-5. **observability: logging_utils + Rerun.** `get_logger` (levelled), `RateMeter`
-   (EWMA loop Hz), `TelemetryRing` (latest-wins ring + CSV). `viz/rerun_log.py`:
-   optional Rerun dashboard (3D transforms, triads, scalars, text), guarded to a
-   no-op when the dep is absent. Tested.
-6. **synthetic harness (the headline).** `scripts/run_synthetic.py` drives the
-   two-stage IK with scripted EE targets (line/circle/pure roll/pitch/yaw), ease-in
-   so targets never teleport. Headless verify + PASS/FAIL table + best-effort GIF
-   (achieved vs commanded triads) + optional CSV/`--rerun`/`--view`. Exit 0 iff all
-   pass. `tests/test_synthetic.py` smoke-tests it.
-7. **replay scaffold.** `vr/replay.py`: `SessionRecorder` + `ReplaySource` (drop-in
-   VRSource), `.npz` format, `replay` transport in `make_source`. Tested round-trip.
+Verification: `uv run pytest -q` → 144 passed (new: world-frame orientation
+contract, real-rig reflection cancellation, body-turn orientation invariance,
+engage continuity, Rerun viz smoke). `uv run python scripts/verify_stack.py` →
+all gates pass; headless loop ~105 Hz on this Mac (no MuJoCo anywhere in the
+runtime). UNVERIFIED until the next headset session: the subjective feel of the
+fixed mapping live (the recording-based scorer says the axes are now right).
 
----
+## Current State
 
-## Assumptions made (because I couldn't ask)
+- `TeleopEngine` uses `vr.body_relative` and `vr.torso_from_head` so arm motion is
+  driven by torso-to-wrist vectors instead of raw room-space hand positions.
+- Calibration and calibration stillness use the same body-relative wrist frame when
+  head samples are available.
+- Arm IK runs on standalone Pinocchio/pink YAM models, with two-stage wrist-position
+  and hand-orientation solves.
+- The render path is `RenderSink`, not `SimWorld`.
+- Unity receives `render.state` over newline-delimited TCP JSON at
+  `127.0.0.1:8102` by default, plus ZMQ/msgpack at `tcp://127.0.0.1:8101` for
+  Python tools.
+- The Unity scaffold under `unity/TeleopRenderer` draws primitive YAM arms from
+  Python-published `arms.*.link_pos` and draws operator torso-to-wrist vectors from
+  `op.hands.*.wrist_body`; `scripts/check_unity_contract.py` statically checks
+  the Unity DTOs, endpoint defaults, coordinate conversions, and scene bootstrap.
+- `run_teleop --record session.npz` captures head/wrist/finger frames plus engage
+  state; `run_teleop --vr replay session.npz` replays them through the same engine
+  and render stream for deterministic debugging, using recorded engagement by
+  default.
+- The old `run_sim.py`, MuJoCo viewer, mapping studio, and overlay tools have been
+  removed from the runtime surface.
 
-1. **No re-scaffold.** "Scaffold per Section 9" is treated as satisfied by the
-   existing `src/bimanual_teleop` layout; a parallel `teleop/teleop` tree would
-   duplicate/shadow working modules (guardrail: don't overwrite work you didn't
-   create). Mapping table above is the bridge.
-2. `teleop_build_spec.md` (referenced by the brief) == the repo `CLAUDE.md`.
-3. Develop against the **real vendored YAM+ORCA model** (it's present and is the
-   IK/sim source of truth via `sim.model.arm_xml`), not mink's bundled example.
-   Swapping models is a `config/rig.yaml` change (the brief's "config change only").
-4. Synthetic mode drives **EE targets relative to home** (the spec's Section 7
-   intent) — this isolates IK and is NOT absolute teleop mapping; the teleop input
-   path remains relative+clutch (`ClutchMapper`, untouched).
-5. **Default `run_synthetic` mode is headless** (verify + GIF), because a live
-   MuJoCo window can't be driven in this autonomous run and would hang. `--view`
-   (mjpython) is the live window for you.
-6. Committed on a branch, not `main`, since this was an unattended batch of changes.
-7. `j3` is the elbow (soft limit already caps its hyperextension); the harness +
-   tests assert all joints (incl. j3) stay within soft limits.
+## Verification
 
----
+Latest local hardware-free gate:
 
-## Verified this run ✅
-- `uv run pytest` → 52 passed (frames incl. +90° roll, One-Euro, IK incl. J6
-  isolation + elbow/limit enforcement, observability, synthetic, replay, and all
-  pre-existing pipeline tests).
-- `uv run python scripts/run_synthetic.py` → all trajectories PASS both arms; GIF +
-  CSV artifacts produced; pure roll realised on j6.
-- One-Euro refactor is behaviour-preserving (existing finger/arm tests still green).
-- Rerun logger degrades to a silent no-op without `rerun-sdk` (it's not installed).
-
-## UNVERIFIED — needs the headset / operator (next session) ⚠️
-These are correct-by-construction or unit-tested in their pure parts, but their
-real-hardware/operator path could not run without the Quest:
-1. **`R_align` real-wrist validation.** The static `R_align = WEBXR_TO_WORLD` is
-   correct on synthetic data and unit-tested. The *per-session yaw correction* and
-   the hand→tool correspondence `P` come from `vr/calibrate.py` driven by a real
-   resting-stance capture — these need a headset to validate. Run the spec's Section
-   8 step 5: with the headset on, a real wrist roll should reproduce the synthetic
-   roll result (faint/solid triads spinning together about blue in `run_sim`).
-2. **Live VR transports** (`vuer_source.py`, `orbit_source.py`): their pure parsing
-   logic is unit-tested (e.g. `test_orbit_source_unity_to_webxr`), but end-to-end
-   streaming from a Quest is unverified here.
-3. **Live session recording** (`SessionRecorder` fed by a real source). The
-   record→save→load→replay machinery is tested on synthetic frames; capturing a
-   real session is the only unverified link.
-4. **Calibration state machine** end-to-end with an operator holding the stance.
-
-## Recommended next steps (in spec bring-up order)
-- **Step 4–5 (headset):** wear the Quest, run `uv run mjpython -m
-  bimanual_teleop.launch.run_sim --vr vuer`, do the resting-stance calibration, and
-  confirm a real wrist roll spins the commanded+achieved triads together about the
-  tool axis. If they diverge, it's `R_align`/`P` (frames/calibration) — the IK is
-  already cleared by the synthetic roll test.
-- Record a short session (wire `SessionRecorder` into `run_sim`), then bisect feel
-  changes with `--vr replay` instead of re-wearing the headset.
-- If you want true cross-arm **self-collision avoidance**, it needs a combined
-  collidable model (the per-arm standalone IK can't see the other arm); enable geoms
-  + pass `collision_pairs=` to `ArmIK` (hook is in place). Today it's mitigated by
-  the anti-cross world-Y guard + workspace box + soft limits.
-- Optional: `uv sync --extra telemetry` then `run_synthetic.py --rerun` for the live
-  Rerun dashboard (3D frames + error/vel/margin time-series).
-
-## How to verify (copy/paste)
-```
-uv run pytest -q                                   # 52 passed
-uv run python scripts/run_synthetic.py             # table + out/run_synthetic.gif
-uv run python scripts/run_synthetic.py --no-gif    # fastest verify only
-uv run mjpython scripts/run_synthetic.py --view     # live window (when you're here)
+```sh
+uv run python scripts/verify_stack.py
 ```
 
-## Live Quest bring-up (started — blocked on headset being worn)
-Quest is connected over **USB/adb** (device `2G0YC5ZH5T005F`), transport = **orbit**
-native app (`com.ORBIT.Teleoperation`, installed). My side is fully ready and
-verified: `adb reverse` sets all 7 ports, the `OrbitVRSource` PULL sockets bind, the
-viz server starts, and **stale detection works** (reports STALE/LOST with no data —
-half of spec step 4). New reusable tool: `scripts/check_quest.py` (prints incoming
-head/hand poses + tracking flags + sample rate; auto-confirms when both hands stream).
+Result:
 
-**Blocker:** `dumpsys power` shows `mWakefulness=Asleep` — the headset is in standby,
-not worn, so ORBIT can't run and nothing streams (an 85 s probe saw 0 messages). VR
-apps can't be launched from standby via adb. To finish spec step 4–5:
-1. Put the Quest ON, launch ORBIT from the app library, set BOTH controllers down,
-   hold hands in view.
-2. `uv run python scripts/check_quest.py` → expect TRACKED + a ~30–70 Hz wrist stream.
-3. Then `uv run mjpython -m bimanual_teleop.launch.run_sim --vr orbit`, do the
-   resting-stance calibration, and confirm a real wrist roll spins the commanded
-   (faint) + achieved (solid) triads together about the tool axis. If they diverge →
-   it's R_align/calibration (the IK is already cleared by the synthetic roll test).
+- pytest: 141 passed
+- rig contract: pass; default config keeps body-relative mode, Unity render
+  endpoints, zero legacy mapper trim, measured elongated-stand base poses/quats,
+  MJCF-derived ORCA flange transforms and YAM joint limits, frozen rest pose, and
+  removed MuJoCo runtime entrypoints; regression tests also reject disabled
+  body-relative mode, non-finite torso offsets, non-positive mapping scale, and
+  disabled absolute wrist orientation
+- no MuJoCo runtime: pass; runtime Python imports, project dependencies, and
+  locked packages do not include `mujoco`, `mink`, or `dm_control`
+- body-relative teleop probe: pass on both arms; headset translation/yaw drift is
+  effectively zero and wrist lift increases robot-world Z
+- body-relative Unity render payload probe: pass on both arms; the Unity-facing
+  `render.state` payload keeps `arms.*.cmd_pos` stable under headset translation
+  and yaw when `op.hands.*.wrist_body` is unchanged, then lifts the commanded
+  target by 16 cm when the torso-relative wrist vector is lifted by 16 cm
+- body-relative arm gating: pass; tracked hand samples without a head pose are not
+  allowed to fall back to raw XR-world wrist coordinates for arm control; ORBIT and
+  Vuer startup frames now expose `head=None` rather than an identity placeholder
+  until a real headset pose arrives; malformed/non-finite Vuer and ORBIT
+  messages fail closed instead of becoming identity hand/head poses; custom/replay
+  body-relative samples with non-finite headset or wrist matrices fail closed at the
+  arm-control boundary, and calibration ignores non-finite pose samples instead of
+  anchoring to them; ORBIT wrist pose freshness is tracked separately from finger
+  landmarks, so fresh landmark packets cannot revive a stale wrist pose for arm
+  control
+- body-relative render gating: pass; Unity `status.tracked` and operator overlay
+  wrist vectors are false/null when a hand is tracked but the headset pose or
+  finite wrist pose needed to form torso-to-wrist motion is missing; non-finite
+  custom/replay headset or wrist matrices fail closed in the arm command path and
+  operator overlay without leaking `NaN` or `Infinity` into strict Unity JSON;
+  malformed/non-finite `vr.torso_from_head` values also fail closed for arm-control
+  samples and fall back to a finite default in the Unity overlay
+- render publisher headset-gating contract: pass; even with legacy
+  `vr.body_relative=false`, the publisher does not fabricate Unity
+  `op.hands.*.wrist_body` without a headset pose, while preserving the separate
+  status tracking semantics
+- render monitor body-state contract: pass; strict monitor mode requires
+  `status.tracked.*` to match `op.hands.*.tracked` and requires `wrist_body` to be
+  null when a side is gated/untracked; it also validates `op.torso_from_head` and
+  the nullable `op.head_pos`/`op.torso_pos` pair before Unity consumes the stream,
+  rejects stale `render.state` schema versions, rejects non-finite arm, hand,
+  operator, and status numeric payloads, and prints achieved-vs-commanded EE error
+  (`cmd_err`) for terminal diagnosis without Unity Editor
+- render schema nullability: pass; when no frame/head pose exists, operator debug
+  state keeps both hand entries present with `tracked=false`, `wrist_body=null`,
+  `head_pos=null`, and `torso_pos=null`
+- YAM geometry provenance: pass; runtime Pinocchio joints/sites match the source
+  MJCF body trees
+- synthetic IK trajectories: pass for line, circle, roll, pitch, yaw on both arms
+- Unity render contract: pass, including Unity C# DTO/static checks and
+  `render_state_sample.json` freshness against Python's `RenderSink.build_state()`;
+  Unity's `ExpectedSchemaVersion` is parsed and checked against Python's
+  `topics.SCHEMA_VERSION`, and Unity TCP client host/port defaults are checked
+  against `config/rig.yaml`'s `vr.unity_json_endpoint`; Unity Editor DTO
+  validation now checks both left and right fixed-shape arm, hand, operator vector,
+  and commanded-target payloads; the render schema includes `arms.*.cmd_pos`, the
+  post-filter/post-clamp commanded EE target in robot world coordinates, so Unity
+  can draw the command separately from the achieved EE pose and connect them with
+  an achieved-to-command error line; the scene bootstrap contract and Editor
+  validation require
+  headset-oriented runtime settings for vSync, 72 FPS target frame rate, sleep
+  prevention, and a dependency-free status HUD for stream, schema/stale/error,
+  loop-rate, engagement/tracking, calibration, operator head/wrist state, and
+  numeric left/right achieved-to-command EE error
+- Unity renderer fail-closed behavior: pass; malformed fixed-shape arm and hand
+  payloads on both left and right sides, null commanded targets, and
+  schema-version mismatches hide the affected command marker or primitives instead
+  of drawing stale/default geometry; the individual YAM arm, ORCA hand, and
+  operator-vector renderers also reject non-finite numeric payloads on direct
+  `Apply()` calls; the Unity TCP client rejects malformed
+  top-level arm, hand, operator vector, `torso_from_head`, status, and calibration
+  shapes plus non-finite numeric values before accepting a render state as current, hides
+  renderers if no valid render state arrives before the configured stale-state
+  timeout, rejects version-correct but incomplete top-level render states, and
+  clears the HUD's latest-state backing data and shows the corresponding HUD status
+  on stale, invalid, schema-mismatched, or malformed-JSON payloads
+- Unity operator overlay fail-closed behavior: pass; nullable, untracked, or
+  malformed fixed-shape `wrist_body` payloads on both left and right sides hide the
+  corresponding torso-to-wrist marker and line without hiding the unaffected side
+- Unity renderer initialization: pass; the YAM arm, ORCA hand, and operator-vector
+  renderers initialize idempotently before `Apply()`, and the operator overlay keeps
+  line renderers parented under the overlay object so Editor validation, scene
+  cleanup, and Play mode use the same object hierarchy
+- Unity material resilience: pass; primitive renderers and the bootstrap floor use
+  shared material creation with built-in/URP/unlit shader fallbacks instead of
+  duplicating `Shader.Find("Standard")` in each renderer; Unity Editor validation
+  also checks that the material factory returns a non-null shader-backed material
+  and preserves the requested color
+- Unity scene/build utility: pass; Editor validation now ensures a saved
+  `Assets/Scenes/TeleopRenderer.unity` scene and registers it in Unity build
+  settings for desktop/Quest builds; bootstrap validation also proves existing
+  cameras, lights, and floor objects are reused instead of duplicated when the
+  renderer is embedded in an existing scene, and the runtime bootstrap still
+  ensures those support objects when a saved/manual `TeleopRenderClient` already
+  exists
+- Unity project contract: pass; static checks require the scaffold to stay
+  dependency-free, require the batch validator to target `unity/TeleopRenderer`,
+  require Unity-generated project folders to stay ignored, and require every
+  committed Unity asset/folder under `Assets/` to have a stable sidecar `.meta`
+  file with a unique 32-character hex GUID and the expected importer type
+- Unity validation runner contract: pass; optional/missing Unity behavior and the
+  required editor-success-marker check are unit-tested without launching Unity; the
+  runner also enforces a bounded Unity batchmode timeout and reports the log tail on
+  timeout
+- verify-stack Unity gate contract: pass; `--unity-editor` is unit-tested to call
+  `scripts/run_unity_validation.py --require`, while the default hardware-free
+  gate skips Unity Editor validation unless explicitly requested
+- launch/diagnostic CLI help (`run_teleop`, `run_hw`, `check_quest`, `check_roll`): pass
+- headless teleop smoke: pass
+- record/replay launch smoke: pass
+- replay body-relative fidelity: pass; saved sessions preserve missing headset poses
+  as `head=None` on replay, and recorded headset+wrist pairs replay to the same
+  `op.hands.*.wrist_body` torso-to-wrist vectors used by Unity and arm control
+- Quest ingest diagnostic: pass; `scripts/check_quest.py` now prints the same
+  body-frame torso-to-wrist vector (`body=[right up forward]`) when a head pose is
+  present, and prints `body=NO_HEAD` instead of falling back to raw room-space wrist
+  coordinates when the headset pose is missing
+- Quest roll diagnostic: pass; `scripts/check_roll.py` analyzes wrist roll in the
+  operator body frame and refuses to accept tracked hand samples without a valid
+  headset pose
+- Unity TCP JSON monitor smoke: pass; runs fake teleop with `--calib-seconds 0`
+  and requires an observed active-command frame with both arms, both fixed-shape
+  hand payloads, finite commanded EE targets, status flags, operator pose fields,
+  and torso-relative wrist vectors; the TCP bridge serializes with strict JSON and
+  drops non-finite frames instead of sending `NaN`/`Infinity` tokens to Unity; the
+  monitor, Unity fixture generator, and static contract reject non-finite sample
+  values too
+- Unity Editor batch validation hook: present (`scripts/run_unity_validation.py
+  --require`), but not run on this machine because Unity Editor is not installed
 
-## Adversarial verification (multi-agent workflow)
-Ran a 5-agent verification workflow (4 adversarial lenses + synthesis) over the
-branch diff. **Verdict: ship_with_notes — no must-fix items, no invariant
-violations, no broken tests, 52/52 re-verified independently.** It confirmed:
-relative+clutch mapping (not absolute), mink-only IK (no pseudoinverse anywhere),
-limits enforced in model + IK + elbow soft cap, frame transforms tested. It
-re-checked and *rejected* its own two "high" flags (the +90° roll test does NOT
-pass with an identity R_ALIGN; the j6 axis genuinely equals the EE tool axis).
+Unity Editor, `dotnet`, and `mcs` are not installed on this machine, so Unity C#
+compilation and an in-editor/Quest visual test remain unverified here. On a Unity
+machine, run `uv run python scripts/verify_stack.py --unity-editor`.
 
-Addressed the high-value notes in commit "harden: …": de-circularized + tightened
-the J6 test, full-matrix ground truth on the +90° roll test, attenuation assertion
-on the filter step test, wrist-rotation round-trip in replay, loop-rate↔IK-dt
-consistency + flip-threshold fix in the harness, explicit replay_path error,
-unified CSV float formatting, and documented the inert `abs_orientation` flag.
+## Useful Commands
 
-Deferred (genuinely low-priority, noted for later):
-- Independently verify the elbow invariant by commanding a hyperextension target and
-  asserting EE error grows (today's check confirms the imposed soft limit holds).
-- Add a large-roll (>j6 soft cap) trajectory to exercise the saturation/regrip
-  regime (current ROLL_AMP≈29° stays inside the cap).
-- Either remove `abs_orientation` entirely (touches config + arm_control) or wire an
-  absolute branch with a differentiating test — documented as inert for now.
-- The Section-3 quaternion change-of-basis helpers in `frames.py` are reference/
-  test-only; the live arm path maps orientation via `ClutchMapper.set_P`. Keep them
-  in sync or route the live path through them later.
-- The record half of record/replay (`SessionRecorder`) has no production caller yet;
-  wire it into `run_sim` (and feed `engaged_at` to the engine) when debugging replay.
+```sh
+uv run python -m bimanual_teleop.launch.run_teleop --vr fake
+uv run python scripts/render_monitor.py --seconds 5
+uv run python scripts/render_monitor.py --transport json --require-hand-render --require-bimanual-state --require-command-target --require-frame --seconds 5
+uv run python scripts/check_rig_contract.py
+uv run python scripts/check_no_mujoco_runtime.py
+uv run python scripts/check_body_relative.py
+uv run python scripts/check_yam_geometry.py
+uv run python scripts/run_synthetic.py
+uv run pytest -q
+uv run python scripts/check_unity_contract.py
+uv run python scripts/update_unity_fixture.py --check
+uv run python scripts/run_unity_validation.py --require
+```
 
-## Known limitations / notes
-- Self-collision avoidance is a documented hook, not active (see above).
-- `out/`, `*.gif`, telemetry dumps are gitignored (generated artifacts).
-- The first journal commit accidentally included a couple of stray editor tags in
-  this file; cleaned in the working tree (and this rewrite). No code was affected.
+For ORBIT on Quest:
+
+```sh
+uv run python -m bimanual_teleop.launch.run_teleop --vr orbit --clutch gesture
+```
+
+`run_teleop --vr orbit` attempts `adb reverse` for render ports when `adb` is
+available.
+
+## Remaining External Validation
+
+- Open `unity/TeleopRenderer` in Unity.
+- Run `uv run python scripts/run_unity_validation.py --require` on a machine with
+  Unity Editor installed.
+- Press Play while `run_teleop --vr fake` is running.
+- Confirm both arms draw from `link_pos` and the torso-to-wrist overlay moves as
+  expected.
+- Build/run on Quest or the intended Unity target.
+- On hardware, validate CAN watchdogs, e-stop, and conservative velocity/limit
+  settings before using gesture clutch with real YAM arms.

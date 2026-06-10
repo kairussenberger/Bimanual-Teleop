@@ -28,10 +28,10 @@ from .frames import HandSample, VRFrame
 from .ingest import VRSource
 
 
-def _mat4(flat) -> np.ndarray:
+def _mat4(flat) -> np.ndarray | None:
     a = np.asarray(flat, dtype=float)
-    if a.size != 16:
-        return np.eye(4)
+    if a.size != 16 or not np.all(np.isfinite(a)):
+        return None
     return a.reshape(4, 4, order="F")   # WebXR/Vuer matrices are column-major
 
 
@@ -75,7 +75,7 @@ class VuerVRSource(VRSource):
         self.debug = bool(v.get("debug", debug))
         self._dbg = {"hand": 0, "cam": 0, "ctrl": 0, "last": ""}
         self._lock = threading.Lock()
-        self._frame = VRFrame(hands={s: HandSample() for s in SIDES})
+        self._frame = VRFrame(head=None, hands={s: HandSample() for s in SIDES})
         self._robot_viz: dict[str, list] = {}   # side -> 16-float col-major matrix (robot hand frame, WebXR)
         self._calib: dict | None = None          # in-headset calibration banner state
         self._hud: list[str] = []                # in-headset live status/log lines
@@ -128,8 +128,20 @@ class VuerVRSource(VRSource):
                     hands={**self._frame.hands, side: HandSample(tracked=False)})
             return
         a = np.asarray(mats, dtype=float).reshape(25, 16)
+        if not np.all(np.isfinite(a)):
+            with self._lock:
+                self._frame = dataclasses.replace(
+                    self._frame, stamp=time.monotonic(),
+                    hands={**self._frame.hands, side: HandSample(tracked=False)})
+            return
         landmarks = a[:, 12:15].copy()                  # per-joint translation (cols 12-14)
-        wrist = a[0].reshape(4, 4, order="F")           # joint 0 transform
+        wrist = _mat4(a[0])                              # joint 0 transform
+        if wrist is None:
+            with self._lock:
+                self._frame = dataclasses.replace(
+                    self._frame, stamp=time.monotonic(),
+                    hands={**self._frame.hands, side: HandSample(tracked=False)})
+            return
         pinch = float(state.get("pinchValue", 0.0)) if isinstance(state, dict) else 0.0
         with self._lock:
             self._frame = dataclasses.replace(
@@ -221,8 +233,10 @@ class VuerVRSource(VRSource):
             self._dbg["cam"] += 1
             cam = (event.value or {}).get("camera", {})
             if cam.get("matrix") is not None:
-                with self._lock:
-                    self._frame = dataclasses.replace(self._frame, head=_mat4(cam["matrix"]))
+                head = _mat4(cam["matrix"])
+                if head is not None:
+                    with self._lock:
+                        self._frame = dataclasses.replace(self._frame, head=head)
 
         @app.add_handler("CONTROLLER_MOVE")
         async def on_ctrl(event, session):

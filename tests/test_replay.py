@@ -1,7 +1,7 @@
 """Record -> save -> load -> replay round-trip (spec Section 7, Replay mode).
 
-The live-capture path needs the headset (UNVERIFIED this run); the machinery that
-makes replay deterministic is tested here on synthetic frames.
+The launcher-level fake-source record/replay smoke is covered by verify_stack; this
+file pins the deterministic replay schema and body-relative fidelity directly.
 
     uv run pytest tests/test_replay.py -q
 """
@@ -50,6 +50,14 @@ def test_replay_from_recorder_no_file():
     assert f0.hands["left"].tracked
 
 
+def test_recorder_save_creates_parent_directory(tmp_path):
+    path = tmp_path / "nested" / "recordings" / "session.npz"
+    saved = _record(n=3).save(path)
+    assert saved == str(path)
+    assert path.exists()
+    assert len(ReplaySource(str(path))) == 3
+
+
 def test_replay_none_landmarks_survive_roundtrip(tmp_path):
     """A hand with no landmarks (e.g. controller-only) must come back as None, not
     an array of NaNs."""
@@ -64,6 +72,68 @@ def test_replay_none_landmarks_survive_roundtrip(tmp_path):
     got = ReplaySource(str(p)).frame_at(0.0)
     assert got.hands["left"].landmarks is None
     assert got.hands["left"].tracked and not got.hands["right"].tracked
+
+
+def test_replay_none_head_survives_roundtrip(tmp_path):
+    """Missing headset pose must be replayed as None, not as an identity matrix.
+    Body-relative arm control relies on this to avoid raw room-space fallback."""
+    from bimanual_teleop.vr.frames import HandSample, VRFrame
+
+    rec = SessionRecorder()
+    wrist = np.eye(4)
+    wrist[:3, 3] = [1.0, 1.2, -0.4]
+    rec.add(
+        VRFrame(
+            stamp=0.0,
+            head=None,
+            hands={"left": HandSample(tracked=True, wrist=wrist, landmarks=None)},
+        ),
+        {"left": True, "right": False},
+        0.0,
+    )
+    p = tmp_path / "missing-head.npz"
+    rec.save(str(p))
+    got = ReplaySource(str(p)).frame_at(0.0)
+    assert got.head is None
+    assert got.hands["left"].tracked is True
+    assert np.allclose(got.hands["left"].wrist, wrist, atol=1e-9)
+
+
+def test_replay_preserves_body_relative_torso_to_wrist_vector(tmp_path):
+    """A recorded headset+wrist pair must replay to the same torso-to-wrist vector
+    Unity renders and arm control consumes."""
+    from bimanual_teleop.render_sink import operator_debug_state
+    from bimanual_teleop.vr.calibrate import head_op_axes
+    from bimanual_teleop.vr.frames import HandSample, VRFrame, euler_to_R
+
+    def pose(R, p):
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = p
+        return T
+
+    torso_from_head = np.array([0.0, -0.35, 0.0])
+    wrist_body = np.array([0.24, 0.31, 0.52])
+    head = pose(euler_to_R([0.1, 0.6, -0.2]), [0.3, 1.65, -0.2])
+    op_axes = head_op_axes(head)
+    wrist = pose(op_axes, head[:3, 3] + op_axes @ (torso_from_head + wrist_body))
+    frame = VRFrame(
+        stamp=0.0,
+        head=head,
+        hands={s: HandSample(tracked=True, wrist=wrist.copy(), landmarks=None) for s in SIDES},
+    )
+
+    rec = SessionRecorder()
+    rec.add(frame, {"left": True, "right": True}, 0.0)
+    p = tmp_path / "body-relative.npz"
+    rec.save(str(p))
+    replayed = ReplaySource(str(p)).frame_at(0.0)
+
+    orig_op = operator_debug_state(frame, torso_from_head)
+    replay_op = operator_debug_state(replayed, torso_from_head)
+    for side in SIDES:
+        assert np.allclose(orig_op["hands"][side]["wrist_body"], wrist_body, atol=1e-9)
+        assert np.allclose(replay_op["hands"][side]["wrist_body"], wrist_body, atol=1e-9)
 
 
 def test_replay_preserves_wrist_rotation(tmp_path):
@@ -94,3 +164,52 @@ def test_replay_loop_wraps():
     assert np.allclose(a.hands["left"].wrist, b.hands["left"].wrist, atol=1e-9)
     c = rs.frame_at(0.75)                        # different time -> different wrist
     assert not np.allclose(a.hands["left"].wrist, c.hands["left"].wrist, atol=1e-3)
+
+
+def test_replay_latest_refreshes_stamp_for_staleness_gate():
+    """Replay uses recorded time for sample selection, but latest() must stamp frames
+    with the current monotonic clock so Supervisor does not reject old recordings."""
+    import time
+    rs = ReplaySource.from_recorder(_record(n=10, hz=10.0))
+    rs.start()
+    try:
+        f = rs.latest()
+        now = time.monotonic()
+        assert f is not None
+        assert abs(now - f.stamp) < 0.2
+    finally:
+        rs.stop()
+
+
+def test_replay_current_engaged_tracks_latest_sample():
+    import time
+    rs = ReplaySource.from_recorder(_record(n=20, hz=10.0))
+    rs.start()
+    try:
+        rs._t0_wall = time.monotonic() - 1.2
+        f = rs.latest()
+        assert f is not None
+        assert rs.current_engaged() == {"left": True, "right": True}
+        rs._t0_wall = time.monotonic() - 0.35
+        rs.latest()
+        assert rs.current_engaged() == {"left": False, "right": False}
+    finally:
+        rs.stop()
+
+
+def test_recorded_clutch_uses_replay_engagement_and_tracking():
+    import time
+    from bimanual_teleop.safety.clutch import RecordedClutch
+
+    rs = ReplaySource.from_recorder(_record(n=20, hz=10.0))
+    clutch = RecordedClutch(rs)
+    rs.start()
+    try:
+        rs._t0_wall = time.monotonic() - 1.2
+        f = rs.latest()
+        assert clutch.engaged("left", f) is True
+        assert clutch.engaged("right", f) is True
+        f.hands["right"].tracked = False
+        assert clutch.engaged("right", f) is False
+    finally:
+        rs.stop()

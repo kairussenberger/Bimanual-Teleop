@@ -4,7 +4,7 @@ visualize the raw hand triads; confirm tracking flags and stale detection").
 
 Starts the live VR source and prints, every tick, the incoming head/hand poses,
 per-hand TRACKED/STALE flags, pose age, pinch, and the message sample-rate — so the
-operator stream can be verified from the terminal WITHOUT the MuJoCo window. Twist
+operator stream can be verified from the terminal without a renderer. Twist
 your wrist and watch the quaternion change: that's the exact signal the orientation
 mapping consumes. Exits early once both hands stream a stable tracked pose.
 
@@ -25,18 +25,35 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from bimanual_teleop.config import SIDES, load_rig          # noqa: E402
+from bimanual_teleop.vr.calibrate import body_relative_hand_sample  # noqa: E402
 from bimanual_teleop.vr.frames import R_to_quat             # noqa: E402
 from bimanual_teleop.vr.ingest import make_source           # noqa: E402
 
 
-def _fmt_hand(h) -> str:
+def _head_ok(head) -> bool:
+    if head is None:
+        return False
+    try:
+        return not np.allclose(np.asarray(head, float).reshape(4, 4), np.eye(4))
+    except (TypeError, ValueError):
+        return False
+
+
+def _fmt_hand(h, head=None, torso_from_head=(0.0, -0.35, 0.0)) -> str:
     if h is None or not h.tracked:
         return "STALE/LOST"
     p = np.asarray(h.wrist, float)[:3, 3]
     q = R_to_quat(np.asarray(h.wrist, float)[:3, :3])
     nlm = 0 if h.landmarks is None else len(h.landmarks)
+    body = ""
+    if _head_ok(head):
+        rel = body_relative_hand_sample(h, np.asarray(head, float).reshape(4, 4), torso_from_head)
+        wb = rel.wrist[:3, 3]
+        body = f" body=[{wb[0]:+.3f} {wb[1]:+.3f} {wb[2]:+.3f}]"
+    else:
+        body = " body=NO_HEAD"
     return (f"TRACKED pos=[{p[0]:+.3f} {p[1]:+.3f} {p[2]:+.3f}] "
-            f"quat=[{q[0]:+.2f} {q[1]:+.2f} {q[2]:+.2f} {q[3]:+.2f}] lm={nlm} pinch={h.pinch:.2f}")
+            f"quat=[{q[0]:+.2f} {q[1]:+.2f} {q[2]:+.2f} {q[3]:+.2f}]{body} lm={nlm} pinch={h.pinch:.2f}")
 
 
 def main() -> int:
@@ -50,6 +67,7 @@ def main() -> int:
     rig = load_rig()
     rig["vr"]["transport"] = args.vr
     rig["vr"]["debug"] = True
+    torso_from_head = rig.get("vr", {}).get("torso_from_head", [0.0, -0.35, 0.0])
     src = make_source(rig)
     print(f"[check_quest] starting '{args.vr}' source for {args.seconds:.0f}s "
           f"(Ctrl-C to stop)\n")
@@ -71,7 +89,7 @@ def main() -> int:
             if f is None:
                 print(f"  t={now - t0:5.1f}s  (no frame yet)")
                 continue
-            head_ok = not np.allclose(np.asarray(f.head, float), np.eye(4))
+            head_ok = _head_ok(f.head)
             head_seen = head_seen or head_ok
             both = True
             line = []
@@ -80,7 +98,7 @@ def main() -> int:
                 tracked = bool(h and h.tracked)
                 ever[s] = ever[s] or tracked
                 both = both and tracked
-                line.append(f"{s:>5}: {_fmt_hand(h)}")
+                line.append(f"{s:>5}: {_fmt_hand(h, f.head, torso_from_head)}")
             counts = getattr(src, "counts", None)
             ctag = f" | msgs {counts}" if counts else ""
             print(f"  t={now - t0:5.1f}s head={'ok' if head_ok else '--'}{ctag}\n"

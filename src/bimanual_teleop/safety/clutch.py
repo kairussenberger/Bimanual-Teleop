@@ -9,6 +9,7 @@ Implementations:
   Re-grip to re-anchor. Tune the gesture to taste; a bluetooth foot pedal is the
   ergonomic ideal and can implement this same interface.
 - KeyboardClutch: a shared flag an external key handler toggles (viewer/CLI).
+- RecordedClutch: reuses engagement decisions saved in a ReplaySource.
 """
 from __future__ import annotations
 
@@ -62,3 +63,16 @@ class KeyboardClutch(Clutch):
     def engaged(self, side: str, frame: VRFrame | None) -> bool:
         tracked = frame is not None and side in frame.hands and frame.hands[side].tracked
         return self.held and tracked
+
+
+class RecordedClutch(Clutch):
+    """Replay-mode clutch: use the engagement decisions saved with the recording."""
+
+    def __init__(self, source):
+        if not hasattr(source, "current_engaged"):
+            raise TypeError("RecordedClutch needs a replay source with current_engaged()")
+        self.source = source
+
+    def engaged(self, side: str, frame: VRFrame | None) -> bool:
+        tracked = frame is not None and side in frame.hands and frame.hands[side].tracked
+        return tracked and bool(self.source.current_engaged().get(side, False))

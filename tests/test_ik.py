@@ -1,4 +1,4 @@
-"""mink two-stage IK wrapper tests: soft-limit enforcement (incl. the elbow), the
+"""pink two-stage IK wrapper tests: soft-limit enforcement (incl. the elbow), the
 self-collision hook, and the CENTRAL J6 claim — a pure tool-axis roll is realised
 on j6 (the wrist-roll joint), not by arcing the forearm. If the J6 test passes,
 a clean wrist roll is an IK-solvable single-joint move, so any *real-wrist* roll
@@ -8,12 +8,12 @@ failure is a frames/tracking problem, not IK/limits (spec Section 7).
 """
 from __future__ import annotations
 
-import mink
+import pink
 import numpy as np
 
 from bimanual_teleop.arms.ik import ArmIK
 from bimanual_teleop.config import load_rig
-from bimanual_teleop.vr.frames import rotvec
+from bimanual_teleop.vr.frames import SE3, SO3, rotvec
 
 
 def _axis_angle_R(axis, angle):
@@ -41,8 +41,8 @@ def test_collision_hook_off_by_default():
     limit is opt-in (the standalone arm model has no collidable geoms)."""
     ik = ArmIK(load_rig(), "left")
     assert len(ik.limits_pos) == 2 and len(ik.limits_ori) == 2
-    assert isinstance(ik.limits_pos[0], mink.ConfigurationLimit)
-    assert isinstance(ik.limits_pos[1], mink.VelocityLimit)
+    assert isinstance(ik.limits_pos[0], pink.limits.ConfigurationLimit)
+    assert isinstance(ik.limits_pos[1], pink.limits.VelocityLimit)
 
 
 def test_ik_never_hyperextends_elbow_under_sweep():
@@ -55,7 +55,7 @@ def test_ik_never_hyperextends_elbow_under_sweep():
     for k in range(72):
         ang = 2 * np.pi * k / 72
         dp = 0.12 * np.array([np.cos(ang), 0.0, np.sin(ang)])
-        tgt = mink.SE3.from_rotation_and_translation(ee_R, p0 + dp)
+        tgt = SE3.from_rotation_and_translation(ee_R, p0 + dp)
         ik.solve(tgt)
         assert ik.within_limits(), f"limit violation at step {k}: margins={ik.limit_margins().round(3)}"
         # explicit elbow check: j3 within its human-plausible soft range
@@ -83,7 +83,7 @@ def test_pure_roll_is_realised_on_j6():
 
     theta = 0.6                                # ~34°, inside the j6 soft cap
     tgt_R = _axis_angle_R(ee_tool, theta) @ ee_R0
-    target = mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(tgt_R), wrist_p)
+    target = SE3.from_rotation_and_translation(SO3.from_matrix(tgt_R), wrist_p)
     for _ in range(200):
         ik.solve(target)
 

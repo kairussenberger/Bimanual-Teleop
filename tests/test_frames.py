@@ -24,10 +24,10 @@ def _axis_angle_R(axis, angle):
     return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
 
 
-def _is_rotation(R, atol=1e-9):
+def _is_rotation(R, atol=1e-9, det_tol=1e-7):
     R = np.asarray(R, float)
     return (np.allclose(R.T @ R, np.eye(3), atol=atol)
-            and abs(np.linalg.det(R) - 1.0) < 1e-7)
+            and abs(np.linalg.det(R) - 1.0) < det_tol)
 
 
 # --- quat_to_R / euler_to_R basics ----------------------------------------- #
@@ -152,48 +152,102 @@ def test_quat_roundtrip_and_algebra():
 
 # --- ClutchMapper: the relative/clutch mapping respects the +90° roll -------- #
 def _se3(R, p):
-    import mink
-    return mink.SE3.from_rotation_and_translation(mink.SO3.from_matrix(np.asarray(R, float)), np.asarray(p, float))
+    from bimanual_teleop.vr.frames import SE3, SO3
+    return SE3.from_rotation_and_translation(SO3.from_matrix(np.asarray(R, float)), np.asarray(p, float))
 
 
-def test_clutch_pure_roll_maps_to_pure_ee_roll_P_identity():
-    """End-to-end through ClutchMapper with the calibration correspondence P = I:
-    a pure wrist roll since engage produces an EE target whose delta-from-anchor is
-    the SAME pure roll about the matching EE-local axis — nothing else. This is the
-    spec's '+90° roll in -> +90° tool roll out' assertion at the mapping layer."""
-    anchor_ee_R = F.euler_to_R([0.3, -0.4, 0.8])   # arbitrary engaged EE orientation
-    anchor_ctrl_R = F.euler_to_R([1.1, 0.2, -0.5])  # arbitrary engaged wrist orientation
-    m = F.ClutchMapper(F.euler_to_R([0.2, 0.0, 1.4]), pos_scale=1.0, abs_orientation=True)
-    m.engage(_se3(anchor_ctrl_R, [1, 2, 3]), _se3(anchor_ee_R, [0.3, 0.1, 0.5]))
-
-    # roll the wrist +90° about its LOCAL x axis (ClutchMapper measures dR in the
-    # hand-local frame): ctrl.R = anchor · Rx(90)
-    local_axis = np.array([1.0, 0.0, 0.0])
-    dR_local = _axis_angle_R(local_axis, np.pi / 2)
-    ctrl_now = _se3(anchor_ctrl_R @ dR_local, [1, 2, 3])
-
-    tgt = m.target(ctrl_now)
-    # EE delta expressed in the EE-local frame
-    ee_delta_local = anchor_ee_R.T @ tgt.rotation().as_matrix()
-    v = F.rotvec(ee_delta_local)
-    assert np.allclose(np.linalg.norm(v), np.pi / 2, atol=1e-7)        # 90° magnitude
-    assert np.allclose(v / np.linalg.norm(v), local_axis, atol=1e-7)   # same axis, nothing else
+def test_clutch_orientation_world_frame_contract():
+    """Orientation obeys the SAME change of basis as translation: a wrist rotation
+    of θ about ctrl-frame axis `a` since engage produces an EE delta of θ about the
+    base-frame axis `R·a`, applied about the anchor in the base frame — from ANY
+    anchor orientations, with no stance/orientation calibration."""
+    rng = np.random.default_rng(7)
+    R = F.euler_to_R([0.2, -0.7, 1.4])              # arbitrary proper ctrl→base map
+    for _ in range(5):
+        anchor_ctrl_R = F.euler_to_R(rng.uniform(-2, 2, 3))
+        anchor_ee_R = F.euler_to_R(rng.uniform(-2, 2, 3))
+        a = rng.normal(size=3)
+        a /= np.linalg.norm(a)
+        th = rng.uniform(-2.0, 2.0)
+        m = F.ClutchMapper(R, pos_scale=1.0)
+        m.engage(_se3(anchor_ctrl_R, [1, 2, 3]), _se3(anchor_ee_R, [0.3, 0.1, 0.5]))
+        ctrl_now = _se3(_axis_angle_R(a, th) @ anchor_ctrl_R, [1, 2, 3])   # left/world delta
+        tgt = m.target(ctrl_now)
+        D_base = tgt.rotation().as_matrix() @ anchor_ee_R.T
+        assert _is_rotation(D_base)
+        assert np.allclose(D_base, _axis_angle_R(R @ a, th), atol=1e-9)
 
 
-def test_clutch_P_remaps_roll_axis():
-    """The calibrated correspondence P (hand-local -> EE-local) is what steers WHICH
-    EE axis a wrist roll drives. With P a 90° axis swap, a roll about hand-local x
-    must come out as a roll about the remapped EE-local axis."""
-    anchor_ee_R = np.eye(3)
-    anchor_ctrl_R = np.eye(3)
-    P = _axis_angle_R([0, 0, 1], np.pi / 2)        # swaps x<->y in EE-local
-    m = F.ClutchMapper(np.eye(3))
-    m.set_P(P)
-    m.engage(_se3(anchor_ctrl_R, [0, 0, 0]), _se3(anchor_ee_R, [0, 0, 0]))
-    dR_local = _axis_angle_R([1, 0, 0], np.pi / 2)  # roll about hand-local x
-    tgt = m.target(_se3(anchor_ctrl_R @ dR_local, [0, 0, 0]))
-    v = F.rotvec(tgt.rotation().as_matrix())
-    assert np.allclose(v / np.linalg.norm(v), P @ [1, 0, 0], atol=1e-6)
+def test_clutch_orientation_body_relative_real_rig_axes():
+    """THE regression test for the scrambled-wrist bug (measured ≈145° median axis
+    error on a real Quest session): through the REAL body-relative data path —
+    head_op_axes (a left-handed basis), body_relative_hand_sample, R_base_from_body
+    on each side's real base_quat — a physical hand rotation about a body axis must
+    command an EE rotation about the corresponding ROBOT-WORLD axis, same angle,
+    right-hand rule, for BOTH arms and ANY head yaw. The two reflections (operator
+    basis and W_AXES) must cancel exactly."""
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.vr.calibrate import R_base_from_body, body_relative_hand_sample, head_op_axes
+
+    rig = load_rig()
+    head = np.eye(4)
+    head[:3, :3] = _axis_angle_R([0, 1, 0], 0.5)    # operator turned 0.5 rad in the room
+    head[:3, 3] = [0.0, 1.6, 0.0]
+    op = head_op_axes(head)                          # [right, up, forward] columns in WebXR
+    # physical rotation axis in the room ↔ expected robot-world rotation axis
+    cases = [(op[:, 2], np.array([-1.0, 0.0, 0.0])),   # body forward → world −X
+             (op[:, 0], np.array([0.0, 1.0, 0.0])),    # body right   → world +Y
+             (op[:, 1], np.array([0.0, 0.0, 1.0]))]    # body up      → world +Z
+    W0 = np.eye(4)
+    W0[:3, :3] = F.euler_to_R([0.9, -0.3, 0.4])      # arbitrary raw wrist orientation
+    W0[:3, 3] = [0.2, 1.2, -0.4]
+    th = 0.9
+    for side in ("left", "right"):
+        bq = rig["arms"][side]["base_quat"]
+        base_R = F.quat_to_R(bq)
+        m = F.ClutchMapper(R_base_from_body(bq), pos_scale=1.0)
+        for axis_xr, want_world in cases:
+            s0 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W0), head)
+            anchor_ee_R = F.euler_to_R([0.3, -0.4, 0.8])
+            m.engage(F.mat_to_se3(s0.wrist), _se3(anchor_ee_R, [0.3, 0.1, 0.5]))
+            W1 = W0.copy()
+            W1[:3, :3] = _axis_angle_R(axis_xr, th) @ W0[:3, :3]   # physical room rotation
+            s1 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W1), head)
+            tgt = m.target(F.mat_to_se3(s1.wrist))
+            D_world = base_R @ (tgt.rotation().as_matrix() @ anchor_ee_R.T) @ base_R.T
+            # rig.yaml base quats carry ~5 decimals; base_R appears 4x in this chain,
+            # so the result is orthogonal/correct only to ~1e-4
+            assert _is_rotation(D_world, atol=1e-4, det_tol=1e-3)
+            assert np.allclose(D_world, _axis_angle_R(want_world, th), atol=1e-4), (side, want_world)
+
+
+def test_clutch_orientation_body_turn_invariance():
+    """Turning your whole body (head yaw, hand rigid relative to the torso) must not
+    move OR rotate the EE target — the orientation analog of the translation
+    body-relative invariance the probes already check."""
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.vr.calibrate import R_base_from_body, body_relative_hand_sample
+
+    rig = load_rig()
+    bq = rig["arms"]["right"]["base_quat"]
+    m = F.ClutchMapper(R_base_from_body(bq), pos_scale=1.0)
+    head0 = np.eye(4)
+    head0[:3, 3] = [0.0, 1.6, 0.0]
+    W0 = np.eye(4)
+    W0[:3, :3] = F.euler_to_R([0.4, 0.2, -0.7])
+    W0[:3, 3] = [0.25, 1.3, -0.45]
+    s0 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W0), head0)
+    anchor_ee_R = F.euler_to_R([0.3, -0.4, 0.8])
+    m.engage(F.mat_to_se3(s0.wrist), _se3(anchor_ee_R, [0.3, 0.1, 0.5]))
+
+    Q = np.eye(4)
+    Q[:3, :3] = _axis_angle_R([0, 1, 0], 0.8)        # body turn about the spine axis
+    head1 = Q @ head0
+    W1 = Q @ W0                                       # hand carried rigidly with the body
+    s1 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W1), head1)
+    tgt = m.target(F.mat_to_se3(s1.wrist))
+    assert np.allclose(tgt.rotation().as_matrix(), anchor_ee_R, atol=1e-9)
+    assert np.allclose(tgt.translation(), [0.3, 0.1, 0.5], atol=1e-9)
 
 
 def test_clutch_position_change_of_basis():

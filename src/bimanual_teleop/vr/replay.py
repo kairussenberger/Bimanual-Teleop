@@ -5,20 +5,22 @@ can be debugged and bisected without wearing the headset. `ReplaySource` is a dr
 `VRSource` (start/stop/latest/frame_at), so the engine + supervisor see exactly what
 they would live — replay a recording, change a gain, replay again, compare.
 
-UNVERIFIED THIS RUN: recording a LIVE Quest feed needs the headset + operator (not
-available now). The record → save → load → replay machinery itself IS tested
-(tests/test_replay.py) on synthetic + hand-built frames; the only unverified step is
-capturing a real session, which is a next-session task once the headset is on.
+`run_teleop --record` and `run_hw --record` wire this recorder into the live
+launchers, and `scripts/verify_stack.py` covers a fake-source record/replay launch
+smoke. Capturing a real Quest/operator session is still external hardware
+validation.
 
 On-disk format (.npz):
-    t[N], head[N,4,4];
+    t[N], head[N,4,4]  (NaN where the frame had no headset pose);
     per side:  {side}_wrist[N,4,4], {side}_tracked[N] bool, {side}_pinch[N],
                {side}_landmarks[N,25,3]  (NaN where the hand had no landmarks);
     engaged[N,2] bool in SIDES order.
 """
 from __future__ import annotations
 
+import os
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -44,11 +46,14 @@ class SessionRecorder:
         self._frames.append(frame)
         self._engaged.append({s: bool(engaged.get(s, False)) for s in SIDES})
 
-    def save(self, path: str) -> str:
+    def save(self, path) -> str:
         n = len(self._t)
         cols: dict[str, np.ndarray] = {
             "t": np.asarray(self._t, float),
-            "head": np.stack([np.asarray(f.head, float) for f in self._frames]) if n
+            "head": np.stack([
+                np.asarray(f.head, float) if f.head is not None else np.full((4, 4), np.nan)
+                for f in self._frames
+            ]) if n
             else np.empty((0, 4, 4)),
             "engaged": np.array([[e[s] for s in SIDES] for e in self._engaged], bool) if n
             else np.empty((0, len(SIDES)), bool),
@@ -70,6 +75,10 @@ class SessionRecorder:
             cols[f"{s}_tracked"] = np.asarray(tracked, bool)
             cols[f"{s}_pinch"] = np.asarray(pinch, float)
             cols[f"{s}_landmarks"] = np.stack(lms) if n else np.empty((0, _N_LM, 3))
+        if isinstance(path, (str, bytes, os.PathLike)):
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            path = str(p)
         np.savez_compressed(path, **cols)
         return path
 
@@ -89,6 +98,7 @@ class ReplaySource:
                           "pinch": np.asarray(d[f"{s}_pinch"], float),
                           "landmarks": np.asarray(d[f"{s}_landmarks"], float)} for s in SIDES}
         self._t0_wall: float | None = None
+        self._last_replay_t = float(self.t[0]) if len(self.t) else 0.0
 
     @classmethod
     def from_recorder(cls, rec: SessionRecorder, **kw) -> "ReplaySource":
@@ -120,6 +130,7 @@ class ReplaySource:
     # --- VRSource API -------------------------------------------------------- #
     def frame_at(self, t: float) -> VRFrame:
         i = self._index(t)
+        head = self.head[i]
         hands = {}
         for s in SIDES:
             d = self._side[s]
@@ -127,18 +138,32 @@ class ReplaySource:
             hands[s] = HandSample(tracked=bool(d["tracked"][i]), wrist=d["wrist"][i].copy(),
                                   landmarks=(None if np.isnan(lm).all() else lm.copy()),
                                   pinch=float(d["pinch"][i]))
-        return VRFrame(stamp=float(self.t[i]), head=self.head[i].copy(), hands=hands)
+        return VRFrame(stamp=float(self.t[i]),
+                       head=(None if np.isnan(head).all() else head.copy()),
+                       hands=hands)
 
     def engaged_at(self, t: float) -> dict[str, bool]:
         row = self.engaged_arr[self._index(t)]
         return {s: bool(row[k]) for k, s in enumerate(SIDES)}
 
+    def current_engaged(self) -> dict[str, bool]:
+        return self.engaged_at(self._last_replay_t)
+
     def latest(self) -> VRFrame | None:
         if len(self.t) == 0:
             return None
         if self._t0_wall is None:                 # synchronous: first recorded frame
-            return self.frame_at(self.t[0])
-        return self.frame_at(self.t[0] + (time.monotonic() - self._t0_wall))
+            self._last_replay_t = float(self.t[0])
+            return self.frame_at(self._last_replay_t)
+        now = time.monotonic()
+        self._last_replay_t = float(self.t[0] + (now - self._t0_wall))
+        f = self.frame_at(self._last_replay_t)
+        # The recorded timestamp drives deterministic sample selection, but live
+        # supervisors compare frame.stamp to the current monotonic clock for
+        # staleness. Refresh the delivery stamp so `run_teleop --vr replay` does
+        # not immediately classify a valid recording as stale.
+        f.stamp = now
+        return f
 
     def start(self) -> None:
         self._t0_wall = time.monotonic()

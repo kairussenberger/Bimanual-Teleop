@@ -23,26 +23,31 @@ Arm home joint angles `neutral_q` (rad), order `[j1, j2, j3, j4, j5, j6]`:
   (CCW from top), right j6 = +1.571 (CW from top). Flipping these signs makes the
   palms face OUTWARD — that is wrong.
 
-Supporting geometry (also frozen, all in `config/rig.yaml` / `sim/model.py`):
+Supporting geometry (also frozen, all in `config/rig.yaml` and the YAM source
+geometry consumed by `src/bimanual_teleop/arms/yam_pin.py`):
 
 - Arm bases bolted to Kai's real elongated AgileX frame (Orca-Yam-teleop c2814b4,
   +0.5 m vs the old stand), so the shoulders ride at z ≈ 1.19:
   `arms.left.base_pos  = [-0.0248, -0.1700, 1.1908]`
   `arms.right.base_pos = [ 0.0101,  0.0801, 1.1875]`
-- Stand = the real 6-part frame mesh (1230 mm tall) in
-  `sim/model.py::_base_scene_xml` (`<!-- Real ELONGATED AgileX frame -->`); the
-  earlier box-riser hack is gone. neutral_q (joint angles) is unchanged by the
-  lift — raising the base just translates the whole arm up, so the hang is identical.
+- Runtime arm bases come from `config/rig.yaml`. The measured YAM link geometry is
+  built from the source MJCF files under `src/bimanual_teleop/sim/models/yam_real/mjcf`;
+  the Unity scaffold renders the current runtime state with primitives rather than
+  owning a second FK model. neutral_q (joint angles) is unchanged by the lift:
+  raising the base just translates the whole arm up, so the hang is identical.
 - Workspace box lowered so the arms-down target is not clipped on teleop engage
   (which had curled both arms to center): `safety.workspace.min[1] = -0.85`
   (was -0.2). Do not raise it back above ≈ -0.6.
 
 ## How it was derived (so it can be reproduced, not re-guessed)
 
-Not hand-tuned: gravity was enabled in the sim with gravity-comp and actuator
-holding-torque zeroed, the arms were let fall limp and settle, and the settled
-qpos was read off — i.e. literally "how the arms fall." Then j6 was rolled ±90°
-for the palms-inward requirement. Verified by render; operator-confirmed.
+Not hand-tuned: this was historically derived in the old MuJoCo sim by enabling
+gravity with gravity-comp and actuator holding-torque zeroed, letting the arms fall
+limp and settle, and reading off the settled qpos — i.e. literally "how the arms
+fall." Then j6 was rolled ±90° for the palms-inward requirement. The current
+runtime no longer depends on MuJoCo; preserve the invariant through `config/rig.yaml`,
+the programmatic Pinocchio YAM model, the body-relative teleop checks, and the Unity
+render contract/fixture checks.
 
 ## Invariants any change must preserve
 
@@ -51,4 +56,6 @@ for the palms-inward requirement. Verified by render; operator-confirmed.
 3. Palms face inward toward the central shaft.
 4. Engaging teleop does not move the arms from rest (workspace box must contain the
    home wrist: `clip_shift == 0`).
-5. `python tests/test_pipeline.py` stays 16/16.
+5. `uv run python scripts/verify_stack.py` passes, including
+   `scripts/check_yam_geometry.py`, `scripts/check_body_relative.py`, synthetic IK,
+   and the Unity render contract/fixture freshness checks.

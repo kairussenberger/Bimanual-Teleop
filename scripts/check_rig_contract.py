@@ -1,0 +1,123 @@
+#!/usr/bin/env python
+"""Validate the default rig contract for body-relative Unity teleop.
+
+This catches config drift that would undo the main rework even if lower-level
+tests still pass with hand-built rigs.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+
+from bimanual_teleop.arms import yam_pin
+from bimanual_teleop.config import SIDES, load_rig
+
+
+REPO = Path(__file__).resolve().parents[1]
+
+FROZEN_NEUTRAL = {
+    "left": np.array([3.137, -0.004, 0.305, -0.162, -0.003, -1.571]),
+    "right": np.array([3.14, -0.001, 0.305, -0.152, 0.001, 1.571]),
+}
+
+FROZEN_BASE_POS = {
+    "left": np.array([-0.0248, -0.1700, 1.1908]),
+    "right": np.array([0.0101, 0.0801, 1.1875]),
+}
+
+FROZEN_BASE_QUAT = {
+    "left": np.array([0.49791, 0.50194, -0.50011, -0.50004]),
+    "right": np.array([0.49989, 0.49988, 0.50055, 0.49968]),
+}
+
+EXPECTED_LIMITS_LO = np.array([row[4] for row in yam_pin._CHAIN])
+EXPECTED_LIMITS_HI = np.array([row[5] for row in yam_pin._CHAIN])
+
+REMOVED_RUNTIME_FILES = [
+    "src/bimanual_teleop/sim/model.py",
+    "src/bimanual_teleop/sim/sim_world.py",
+    "src/bimanual_teleop/launch/run_sim.py",
+]
+
+
+def require(cond: bool, msg: str) -> None:
+    if not cond:
+        raise AssertionError(msg)
+
+
+def check_vector(name: str, value, n: int) -> np.ndarray:
+    arr = np.asarray(value, dtype=float)
+    require(arr.shape == (n,), f"{name} must be a length-{n} numeric vector")
+    require(np.all(np.isfinite(arr)), f"{name} must contain finite numbers")
+    return arr
+
+
+def main() -> int:
+    rig = load_rig()
+    vr = rig.get("vr", {})
+    require(vr.get("body_relative") is True, "vr.body_relative must default to true")
+    torso = check_vector("vr.torso_from_head", vr.get("torso_from_head"), 3)
+    require(-0.8 < torso[1] < -0.05, "vr.torso_from_head must place torso below headset in body-up axis")
+    require(str(vr.get("render_endpoint", "")).startswith("tcp://"), "vr.render_endpoint must be a tcp:// endpoint")
+    require(str(vr.get("unity_json_endpoint", "")).startswith("tcp://"), "vr.unity_json_endpoint must be a tcp:// endpoint")
+
+    mapping = rig.get("mapping", {})
+    pos_scale = float(mapping.get("pos_scale", float("nan")))
+    require(np.isfinite(pos_scale) and pos_scale > 0.0, "mapping.pos_scale must be finite and positive")
+    for stale in ("abs_orientation", "ori_tweak_euler"):
+        require(stale not in mapping,
+                f"mapping.{stale} is a removed knob — orientation now uses the calibration-free "
+                "world-frame relative mapping (ClutchMapper.target); delete the stale key")
+    require(float(rig.get("vr", {}).get("calib_seconds", 0.0)) == 0.0,
+            "vr.calib_seconds must default to 0 — the arm mapping is calibration-free; "
+            "pass --calib-seconds for legacy stance diagnostics instead of baking it in")
+
+    trims = mapping.get("r_base_from_vr_euler", {})
+    for side in SIDES:
+        trim = check_vector(f"mapping.r_base_from_vr_euler.{side}", trims.get(side), 3)
+        require(np.linalg.norm(trim) < 1e-12, f"legacy mapper trim for {side} must stay zero in body-relative mode")
+
+        arm = rig.get("arms", {}).get(side, {})
+        base_pos = check_vector(f"arms.{side}.base_pos", arm.get("base_pos"), 3)
+        require(np.allclose(base_pos, FROZEN_BASE_POS[side], atol=1e-9),
+                f"arms.{side}.base_pos changed from the measured elongated-stand placement")
+        quat = check_vector(f"arms.{side}.base_quat", arm.get("base_quat"), 4)
+        require(abs(np.linalg.norm(quat) - 1.0) < 2e-3, f"arms.{side}.base_quat must be normalized")
+        require(np.allclose(quat, FROZEN_BASE_QUAT[side], atol=1e-9),
+                f"arms.{side}.base_quat changed from the measured elongated-stand placement")
+        hand_pos = check_vector(f"arms.{side}.hand_pos", arm.get("hand_pos"), 3)
+        hand_euler = check_vector(f"arms.{side}.hand_euler", arm.get("hand_euler"), 3)
+        _, ee_pos, ee_euler = yam_pin._EE_SITE[side]
+        require(np.allclose(hand_pos, np.asarray(ee_pos, dtype=float), atol=1e-9),
+                f"arms.{side}.hand_pos must match the MJCF-derived ORCA flange site")
+        require(np.allclose(hand_euler, np.asarray(ee_euler, dtype=float), atol=1e-9),
+                f"arms.{side}.hand_euler must match the MJCF-derived ORCA flange site")
+        q = check_vector(f"arms.{side}.neutral_q", arm.get("neutral_q"), 6)
+        require(np.allclose(q, FROZEN_NEUTRAL[side], atol=1e-9),
+                f"arms.{side}.neutral_q changed from docs/RESTING_POSE.md")
+
+    limits = rig.get("arms", {}).get("joint_limits", {})
+    lo = check_vector("arms.joint_limits.lower", limits.get("lower"), 6)
+    hi = check_vector("arms.joint_limits.upper", limits.get("upper"), 6)
+    require(np.all(lo < hi), "joint lower limits must be below upper limits")
+    require(np.allclose(lo, EXPECTED_LIMITS_LO, atol=1e-9),
+            "arms.joint_limits.lower must match the MJCF-derived YAM joint limits")
+    require(np.allclose(hi, EXPECTED_LIMITS_HI, atol=1e-9),
+            "arms.joint_limits.upper must match the MJCF-derived YAM joint limits")
+
+    workspace = rig.get("safety", {}).get("workspace", {})
+    wmin = check_vector("safety.workspace.min", workspace.get("min"), 3)
+    wmax = check_vector("safety.workspace.max", workspace.get("max"), 3)
+    require(np.all(wmin < wmax), "workspace min must be below max")
+    require(wmin[1] <= -0.6, "workspace y-min must contain the frozen arms-down home wrist")
+
+    for rel in REMOVED_RUNTIME_FILES:
+        require(not (REPO / rel).exists(), f"removed MuJoCo runtime file came back: {rel}")
+
+    print("rig contract preserves body-relative Unity runtime defaults")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

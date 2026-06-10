@@ -1,14 +1,16 @@
 """Run the teleop pipeline against REAL hardware (Linux control host).
 
 This is the hardware bring-up entrypoint. It reuses the exact TeleopEngine +
-controllers + supervisor as the sim — only the *sink* changes (HardwareSink →
+controllers + supervisor as the render path — only the *sink* changes (HardwareSink →
 YAM CAN + ORCA serial). Single-process bring-up form; for production split each
 arm into its own ~250 Hz CAN process (see README "Hardware day").
 
 Prereqs (Ubuntu): SocketCAN up (`sudo ip link set can0 up type can bitrate 1000000`,
 same for can1), i2rt SDK installed, ORCA hands tensioned + calibrated.
 
-    python -m bimanual_teleop.launch.run_hw --vr vuer
+    python -m bimanual_teleop.launch.run_hw --vr orbit
+    python -m bimanual_teleop.launch.run_hw --vr orbit --record recordings/hw_session.npz
+    python -m bimanual_teleop.launch.run_hw --vr replay recordings/hw_session.npz --clutch recorded
 
 SAFETY: starts in IDLE (not following). Engage via the configured clutch. Ctrl+C
 or e-stop releases torque on all devices.
@@ -19,31 +21,45 @@ import argparse
 import sys
 import time
 
-from ..config import SIDES, load_rig
+from ..config import load_rig
 from ..engine import TeleopEngine
-from ..safety.clutch import GestureClutch
+from ..safety.clutch import GestureClutch, RecordedClutch
 from ..safety.supervisor import Supervisor
 from ..vr.ingest import make_source
+from ..vr.replay import SessionRecorder
 
 
 def main() -> int:
-    if sys.platform == "darwin":
-        print("WARNING: real YAM control needs Linux/SocketCAN; macOS can't run the CAN loop.")
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--vr", choices=["vuer", "fake"], default="vuer")
+    ap.add_argument("--vr", choices=["vuer", "orbit", "fake", "replay"], default="orbit")
+    ap.add_argument("replay_path", nargs="?", help="session .npz when --vr replay")
+    ap.add_argument("--clutch", choices=["gesture", "recorded"], default="gesture",
+                    help="hardware engage policy (default: gesture; recorded is for replay sessions)")
+    ap.add_argument("--record", metavar="PATH", default=None,
+                    help="write VR frames + engage state to a replayable .npz session")
     ap.add_argument("--hz", type=float, default=None, help="override control rate")
     args = ap.parse_args()
 
+    if sys.platform == "darwin":
+        print("WARNING: real YAM control needs Linux/SocketCAN; macOS can't run the CAN loop.")
+
     rig = load_rig()
     rig["vr"]["transport"] = args.vr
+    if args.vr == "replay":
+        if not args.replay_path:
+            ap.error("--vr replay needs a session file: run_hw --vr replay session.npz")
+        rig["vr"]["replay_path"] = args.replay_path
     hz = args.hz or rig["control"]["arm_hz"]
+
+    src = make_source(rig)
+    clutch = RecordedClutch(src) if args.clutch == "recorded" else GestureClutch()
 
     from ..hardware import HardwareSink
     sink = HardwareSink(rig)
     engine = TeleopEngine(rig, sink)
-    supervisor = Supervisor(rig, GestureClutch())
-    src = make_source(rig)
+    supervisor = Supervisor(rig, clutch)
     src.start()
+    recorder = SessionRecorder() if args.record else None
     push_calib = hasattr(src, "set_calib")   # in-headset calibration countdown (Vuer)
 
     period = 1.0 / hz
@@ -51,7 +67,10 @@ def main() -> int:
         while True:
             t = time.monotonic()   # shared clock with source stamps + supervisor staleness
             frame = src.latest()
-            engine.tick(frame, supervisor.update(frame, t), t)
+            engaged = supervisor.update(frame, t)
+            if recorder is not None and frame is not None:
+                recorder.add(frame, engaged, t)
+            engine.tick(frame, engaged, t)
             if push_calib:
                 src.set_calib(engine.calib_status)
             dt = period - (time.monotonic() - t)
@@ -63,6 +82,9 @@ def main() -> int:
         supervisor.estop()
         src.stop()
         sink.close()
+        if recorder is not None:
+            recorder.save(args.record)
+            print(f"recorded {len(recorder)} frames -> {args.record}")
     return 0
 
 
