@@ -44,7 +44,7 @@ def test_check_quest_formats_body_relative_wrist_vector():
     head[:3, 3] = [0.0, 1.6, 0.0]
     op_axes = head_op_axes(head)
     wrist = np.eye(4)
-    wrist[:3, :3] = op_axes
+    wrist[:3, :3] = np.eye(3)
     wrist[:3, 3] = head[:3, 3] + op_axes @ (torso_from_head + wrist_body)
 
     text = cq._fmt_hand(HandSample(tracked=True, wrist=wrist), head, torso_from_head)

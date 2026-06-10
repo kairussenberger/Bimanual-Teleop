@@ -271,7 +271,8 @@ class ClutchMapper:
     def __init__(self, R_base_from_vr: np.ndarray, pos_scale: float = 1.0, *,
                  position_mode: str = "relative", chest_base=None,
                  engage_blend_s: float = 1.0, twist_mode: str = "world",
-                 hand_twist_axis=None, ee_tool_axis=None):
+                 hand_twist_axis=None, ee_tool_axis=None,
+                 orientation_mode: str = "relative", hand_ee_convention=None):
         if position_mode not in ("relative", "absolute"):
             raise ValueError(f"position_mode must be 'relative' or 'absolute', got {position_mode!r}")
         if position_mode == "absolute" and chest_base is None:
@@ -281,6 +282,10 @@ class ClutchMapper:
         if twist_mode == "intrinsic" and (hand_twist_axis is None or ee_tool_axis is None):
             raise ValueError("intrinsic twist_mode needs hand_twist_axis (hand-local) and "
                              "ee_tool_axis (EE-local j6 axis)")
+        if orientation_mode not in ("relative", "absolute"):
+            raise ValueError(f"orientation_mode must be 'relative' or 'absolute', got {orientation_mode!r}")
+        if orientation_mode == "absolute" and hand_ee_convention is None:
+            raise ValueError("absolute orientation_mode needs hand_ee_convention (EE-local→hand-local)")
         self.R = np.asarray(R_base_from_vr, dtype=float).reshape(3, 3)
         self.scale = float(pos_scale)
         self.mode = position_mode
@@ -294,10 +299,16 @@ class ClutchMapper:
             e = np.asarray(ee_tool_axis, dtype=float).reshape(3)
             self.hand_axis = h / (np.linalg.norm(h) + 1e-12)
             self.ee_axis = e / (np.linalg.norm(e) + 1e-12)
+        self.orientation_mode = orientation_mode
+        self.C = None
+        if orientation_mode == "absolute":
+            self.C = np.asarray(hand_ee_convention, dtype=float).reshape(3, 3)
         self.anchor_ctrl: SE3 | None = None
         self.anchor_ee: SE3 | None = None
         self._blend_t0: float | None = None
         self._blend_off = np.zeros(3)
+        self._ori_off_axis = np.zeros(3)
+        self._ori_off_ang = 0.0
 
     def set_R(self, R: np.ndarray) -> None:
         """Replace the ctrl→base rotation (legacy stance calibration only)."""
@@ -311,16 +322,27 @@ class ClutchMapper:
     def _p_abs(self, ctrl: SE3) -> np.ndarray:
         return self.chest + self.scale * (self.R @ ctrl.translation())
 
+    def _R_abs(self, ctrl: SE3) -> np.ndarray:
+        """Absolute EE attitude (base frame): the operator's hand attitude mapped
+        through the body↔world axes (self.R @ ctrl.R is PROPER — the two
+        reflections cancel) composed with the fixed hand↔EE convention."""
+        return self.R @ ctrl.rotation().as_matrix() @ self.C
+
     def engage(self, ctrl: SE3, ee: SE3, t: float | None = None) -> None:
         """Latch position AND orientation anchors on the clutch rising edge, so the
         target equals the current EE pose at the engage instant (no jump). In
-        absolute mode also latch the EE−absolute offset; it decays from `t` over
-        `engage_blend_s` (t=None holds the offset until a timed target() call)."""
+        absolute modes also latch the EE−absolute offsets; they decay from `t` over
+        `engage_blend_s` (t=None holds the offsets until a timed target() call)."""
         self.anchor_ctrl = ctrl
         self.anchor_ee = ee
         if self.mode == "absolute":
             self._blend_off = ee.translation() - self._p_abs(ctrl)
             self._blend_t0 = t
+        if self.orientation_mode == "absolute":
+            rv = rotvec(self._R_abs(ctrl).T @ ee.rotation().as_matrix())
+            self._ori_off_ang = float(np.linalg.norm(rv))
+            self._ori_off_axis = rv / self._ori_off_ang if self._ori_off_ang > 1e-9 else np.zeros(3)
+            self._blend_t0 = t if t is not None else self._blend_t0
 
     def release(self) -> None:
         self.anchor_ctrl = None
@@ -358,15 +380,30 @@ class ClutchMapper:
         measured at ~145° median axis error on a real Quest session.
         """
         assert self.anchor_ctrl is not None and self.anchor_ee is not None
+        if t is None or self._blend_t0 is None:
+            k = 1.0
+        else:
+            k = float(np.exp(-3.0 * max(0.0, t - self._blend_t0) / max(self.blend_s, 1e-6)))
         if self.mode == "absolute":
-            if t is None or self._blend_t0 is None:
-                k = 1.0
-            else:
-                k = float(np.exp(-3.0 * max(0.0, t - self._blend_t0) / max(self.blend_s, 1e-6)))
             p = self._p_abs(ctrl) + k * self._blend_off
         else:
             dp_vr = ctrl.translation() - self.anchor_ctrl.translation()
             p = self.anchor_ee.translation() + self.scale * (self.R @ dp_vr)
+        if self.orientation_mode == "absolute":
+            # The robot hand WEARS your hand's attitude (mapped through the body↔
+            # world axes + the fixed hand↔EE convention). The engage-latched offset
+            # decays with the same blend as position, so re-engages glide instead
+            # of snapping; after the glide, the overlay hand skeleton and the
+            # rendered ORCA hand coincide by construction.
+            R_abs = self._R_abs(ctrl)
+            if np.linalg.det(R_abs) < 0.0:
+                # A REFLECTION here means the ctrl sample's rotation was improper
+                # (real devices never produce one; synthetic fixtures can). Never
+                # hand the IK a reflection — fail closed on the anchor attitude.
+                return SE3.from_rotation_and_translation(self.anchor_ee.rotation(), p)
+            Rt = R_abs @ quat_to_R(
+                quat_from_axis_angle(self._ori_off_axis, k * self._ori_off_ang))
+            return SE3.from_rotation_and_translation(SO3.from_matrix(Rt), p)
         dR = ctrl.rotation().as_matrix() @ self.anchor_ctrl.rotation().as_matrix().T
         A = self.anchor_ee.rotation().as_matrix()
         if self.twist_mode == "intrinsic":

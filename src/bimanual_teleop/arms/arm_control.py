@@ -53,8 +53,24 @@ class ArmController:
         # j6 roll about the EE's own tool axis (never a j4/j5 swing through the
         # wrist singularity). Forced to 'world' in legacy raw-room mode.
         twist_mode = str(m.get("twist_mode", "intrinsic"))
+        ori_mode = str(m.get("orientation_mode", "absolute"))
         if not body_relative:
             twist_mode = "world"
+            ori_mode = "relative"
+        C = None
+        if ori_mode == "absolute":
+            # Hand↔EE convention, derived (no calibration): the EE basis comes from
+            # the frozen rest contract (fingers along approach, palm inward); the
+            # hand basis from measured hand-local finger/palm-back axes.
+            from ..viz.hand_geom import hand_basis_for_side
+            B = hand_basis_for_side(self.ik, self.base_R, side)        # EE-local [lat|palm-back|fingers]
+            f = np.asarray(m.get("hand_finger_axis", [0.345, -0.363, -0.866]), dtype=float)
+            f = f / np.linalg.norm(f)
+            p = np.asarray(m.get("hand_palm_axis", [-0.496, 0.713, -0.496]), dtype=float)
+            p = p - (p @ f) * f
+            p = p / np.linalg.norm(p)
+            H = np.column_stack([np.cross(p, f), p, f])                # hand-local [lat|palm-back|fingers]
+            C = H @ B.T                                                # EE-local → hand-local
         self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"], position_mode=mode,
                                    chest_base=chest_base if mode == "absolute" else None,
                                    engage_blend_s=float(m.get("engage_blend_s", 1.0)),
@@ -62,7 +78,8 @@ class ArmController:
                                    hand_twist_axis=m.get("hand_twist_axis", [0.0, 0.456, 0.890])
                                    if twist_mode == "intrinsic" else None,
                                    ee_tool_axis=self.ik.ee_tool_axis_local
-                                   if twist_mode == "intrinsic" else None)
+                                   if twist_mode == "intrinsic" else None,
+                                   orientation_mode=ori_mode, hand_ee_convention=C)
         # Anti-cross guard: keep this hand on its own side of the world Y axis so
         # the two arms can never overlap. left stays y ≤ -gap, right stays y ≥ +gap.
         gap = float(rig.get("vr", {}).get("cross_gap", 0.05))

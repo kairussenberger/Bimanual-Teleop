@@ -116,7 +116,7 @@ def test_replay_preserves_body_relative_torso_to_wrist_vector(tmp_path):
     wrist_body = np.array([0.24, 0.31, 0.52])
     head = pose(euler_to_R([0.1, 0.6, -0.2]), [0.3, 1.65, -0.2])
     op_axes = head_op_axes(head)
-    wrist = pose(op_axes, head[:3, 3] + op_axes @ (torso_from_head + wrist_body))
+    wrist = pose(np.eye(3), head[:3, 3] + op_axes @ (torso_from_head + wrist_body))
     frame = VRFrame(
         stamp=0.0,
         head=head,

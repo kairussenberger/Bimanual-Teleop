@@ -3,6 +3,35 @@
 The repository has been reworked away from the old local MuJoCo simulator toward a
 headless body-relative teleop runtime with a Unity render stream.
 
+## 2026-06-10 (absolute orientation — the overlay-overlap fix)
+
+Operator, looking at the dashboard overlay: the tracked hand skeleton and the
+ORCA hand "are not overlapping" (≈90° off on some axis). Measured: under
+RELATIVE orientation the skeleton↔robot-hand attitude offset was 127–181° and
+DRIFTING — relative mapping can never make them coincide.
+
+Change (`mapping.orientation_mode: absolute`, default): the robot hand wears the
+operator's hand attitude — R_t = R·ctrl_R·C (proper: the two reflections cancel)
+with the hand↔EE convention C DERIVED, not calibrated: EE side from the frozen
+rest contract (hand_basis_for_side), hand side from measured hand-local
+finger/palm axes (`mapping.hand_finger_axis/hand_palm_axis`, from the recording's
+palm-on-desk phase). Engage-latched offset decays with the shared glide.
+
+Results on the real recording: skeleton↔commanded attitude 0.00° post-glide
+(2.6° via the analyzer's stricter reconstruction), and IK orientation tracking
+improved 68°→0.1° median — absolute attitudes are reachable ones, so the wrist
+now works mid-range instead of pinned at ±89°.
+
+Bug found on the way (the probes "exploded"): several synthetic fixtures built
+RAW wrist rotations from `op_axes` — a REFLECTION (det −1) that real devices
+never produce. Relative deltas cancelled it; absolute attitude inherited it and
+handed the QP a reflection target → instant joint-limit wedge. Fixed all
+fixtures (proper rotations; rigid body-motion carries the head rotation), added
+a det<0 fail-closed guard in the mapper + regression test, and recorded the
+frame-hygiene rule in CLAUDE.md.
+
+165 tests + verify_stack pass; overlay coincidence screenshot-verified.
+
 ## 2026-06-10 (real ORCA hands)
 
 Operator pushback ("don't you have a model of the orca hands? that is not the

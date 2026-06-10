@@ -55,24 +55,30 @@ from the first tick). The `ik.soft_margin` values are sized so this front-of-bod
 workspace is reachable — re-tightening them below the measured excursions in
 config/rig.yaml's comment will pin the arm short of its targets again.
 
-EE ORIENTATION is CALIBRATION-FREE and split swing/twist
-(`mapping.twist_mode: intrinsic`, `ClutchMapper.target`): the wrist rotation
-since clutch-engage is decomposed about the operator's forearm axis
-(`mapping.hand_twist_axis`, measured from a real session). The TWIST becomes an
-EE roll about the EE's OWN tool/j6 axis — a wrist turn is always a pure j6 roll,
-never a j4/j5 swing through the wrist singularity (verified at 1.9° median
-contract error on a real recording). The residual SWING (real pitch/yaw of the
-hand) maps through the same body→world axes as translation. `twist_mode: world`
-(fully extrinsic) is diagnostics-only. `vr.calib_seconds` defaults to 0; the
+EE ORIENTATION is ABSOLUTE and calibration-free
+(`mapping.orientation_mode: absolute`): the robot hand WEARS the operator's hand
+attitude — mapped through the body↔world axes and a DERIVED hand↔EE convention
+(EE side from the frozen rest contract via `viz.hand_geom.hand_basis_for_side`;
+hand side from `mapping.hand_finger_axis`/`hand_palm_axis`, measured from a real
+session) — gliding over `engage_blend_s` on (re)engage. Consequences: the
+dashboard-overlay hand skeleton and the rendered ORCA hand coincide by
+construction (verified 0.00° post-glide on a real recording), and commanded
+wrist attitudes are reachable ones (IK orientation tracking 68°→0.1° median on
+the same session). A wrist turn is inherently a pure j6 roll because the whole
+attitude follows.
+
+`orientation_mode: relative` is a per-run diagnostic; in that mode
+`mapping.twist_mode: intrinsic` decomposes deltas about the operator's forearm
+axis so the twist still lands on j6. `vr.calib_seconds` defaults to 0; the
 legacy stance hold only steers arms when `vr.body_relative` is false.
 
-Known physics: orientation is relative-latched, so a large attitude offset
-between hand and EE accumulated at engage (e.g. engaging at rest then raising
-the hand without re-orienting) can command wrist attitudes near the YAM's
-reach/limit envelope; re-engaging the clutch re-anchors and clears the offset.
-If live feel demands it, the designed next step is absolute orientation with a
-fixed hand↔EE convention (derivable from the measured hand axes — still no
-stance calibration).
+FRAME HYGIENE (hard-won): real devices only ever produce PROPER wrist rotations;
+`head_op_axes`/`W_AXES` are left-handed bases whose reflections must cancel in
+pairs. Synthetic fixtures must NEVER use `op_axes` as a wrist rotation — an
+improper raw wrist makes the absolute attitude a reflection and the QP explodes
+(the mapper now fails closed on det<0, and
+`test_absolute_orientation_fails_closed_on_improper_ctrl_rotation` pins it).
+Rigid body-motion fixtures must carry the head rotation on the wrist.
 
 Do not reintroduce a stance-calibrated hand-local↔EE-local correspondence: an
 imperfect calibration pose scrambles every commanded rotation axis (measured 145°

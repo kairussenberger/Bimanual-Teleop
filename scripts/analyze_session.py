@@ -85,6 +85,7 @@ def main() -> int:
     engine = TeleopEngine(rig, NullSink())
     arm = engine.arm[side]
     twist_mode = str(rig.get("mapping", {}).get("twist_mode", "intrinsic"))
+    ori_mode = str(rig.get("mapping", {}).get("orientation_mode", "absolute"))
     hand_axis = np.asarray(rig.get("mapping", {}).get("hand_twist_axis", [0.0, 0.456, 0.890]), float)
     hand_axis = hand_axis / np.linalg.norm(hand_axis)
 
@@ -146,6 +147,10 @@ def main() -> int:
         ee_ax_b = A_R @ arm.ik.ee_tool_axis_local
         phi_e = swing_twist_angle(D_ee, ee_ax_b)
         swing_h = float(np.degrees(np.linalg.norm(rotvec(D_sw))))
+        abs_ori_err = float("nan")
+        if arm.mapper.C is not None:
+            pred_abs = base_R.T @ Q @ W[:3, :3] @ arm.mapper.C      # skeleton attitude ∘ convention
+            abs_ori_err = float(np.degrees(np.linalg.norm(rotvec(pred_abs.T @ arm.cmd_R))))
 
         # --- translation ------------------------------------------------------- #
         # Body-frame torso→wrist vector, recomputed the same way
@@ -173,6 +178,7 @@ def main() -> int:
             "twist_e": float(np.degrees(phi_e)),
             "swing_h": swing_h,
             "contract_err": contract_err,
+            "abs_ori_err": abs_ori_err,
             "ctrl_p": ctrl_p,
             "cmd_w": cmd_w,
             "ik_ori_err": ik_ori_err,
@@ -186,7 +192,20 @@ def main() -> int:
 
     sc = [r for r in rows if r["hand_ang"] >= args.min_angle]
     print(f"\nscored {len(sc)}/{len(rows)} engaged frames with hand rotation ≥ {args.min_angle:.0f}°")
-    if twist_mode == "intrinsic":
+    if ori_mode == "absolute":
+        print("\n---- ORIENTATION mapping (orientation_mode=absolute) ----")
+        blend = float(rig.get("mapping", {}).get("engage_blend_s", 1.0))
+        settled = [r for r in rows if r["t"] - r["t_engage"] > 2.0 * blend and np.isfinite(r["abs_ori_err"])]
+        if settled:
+            ae = np.array([r["abs_ori_err"] for r in settled])
+            print(f"  |skeleton attitude ∘ convention − commanded|: median {np.median(ae):5.2f}°  "
+                  f"p90 {np.percentile(ae, 90):5.2f}°   (post-glide; the overlay-overlap guarantee)")
+            ok_ori = np.median(ae) < 5.0
+        else:
+            ok_ori = True
+            print("  (no settled frames; orientation unscored)")
+        print(f"  VERDICT: {'OK — robot hand wears your hand attitude' if ok_ori else 'BROKEN — absolute orientation contract violated'}")
+    elif twist_mode == "intrinsic":
         print("\n---- ORIENTATION mapping (twist_mode=intrinsic) ----")
         ce = np.array([r["contract_err"] for r in sc]) if sc else np.array([])
         ok_ori = True

@@ -75,6 +75,15 @@ def main() -> int:
             "never a j4/j5 swing through the wrist singularity ('world' is diagnostics only)")
     hta = check_vector("mapping.hand_twist_axis", mapping.get("hand_twist_axis"), 3)
     require(abs(np.linalg.norm(hta) - 1.0) < 0.05, "mapping.hand_twist_axis must be (near) unit length")
+    require(mapping.get("orientation_mode") == "absolute",
+            "mapping.orientation_mode must default to 'absolute' — the robot hand wears the "
+            "operator's hand attitude (overlay skeleton and ORCA hand coincide); 'relative' is "
+            "a per-run diagnostic choice")
+    hfa = check_vector("mapping.hand_finger_axis", mapping.get("hand_finger_axis"), 3)
+    hpa = check_vector("mapping.hand_palm_axis", mapping.get("hand_palm_axis"), 3)
+    require(abs(np.linalg.norm(hfa) - 1.0) < 0.05, "mapping.hand_finger_axis must be (near) unit length")
+    require(abs(np.linalg.norm(hpa) - 1.0) < 0.05, "mapping.hand_palm_axis must be (near) unit length")
+    require(abs(float(hfa @ hpa)) < 0.2, "hand finger/palm axes must be roughly orthogonal")
     anchor = mapping.get("body_anchor_world")
     if anchor is not None:
         check_vector("mapping.body_anchor_world", anchor, 3)

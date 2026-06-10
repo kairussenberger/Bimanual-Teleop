@@ -224,11 +224,11 @@ def test_body_relative_wrist_cancels_head_translation_and_yaw():
 
     head0 = pose(np.eye(3), [0.0, 1.6, 0.0])
     op0 = head_op_axes(head0)
-    hand0 = HandSample(tracked=True, wrist=pose(op0, head0[:3, 3] + op0 @ head_to_wrist))
+    hand0 = HandSample(tracked=True, wrist=pose(np.eye(3), head0[:3, 3] + op0 @ head_to_wrist))
 
     head1 = pose(euler_to_R([0.0, 0.7, 0.0]), [0.4, 1.7, -0.2])
     op1 = head_op_axes(head1)
-    hand1 = HandSample(tracked=True, wrist=pose(op1, head1[:3, 3] + op1 @ head_to_wrist))
+    hand1 = HandSample(tracked=True, wrist=pose(head1[:3, :3], head1[:3, 3] + op1 @ head_to_wrist))  # rigid: hand carries the body turn
 
     rel0 = body_relative_hand_sample(hand0, head0, torso_from_head)
     rel1 = body_relative_hand_sample(hand1, head1, torso_from_head)
@@ -418,7 +418,7 @@ def test_engine_body_motion_does_not_drive_arm_but_hand_lift_does():
     def frame(head, torso_to_wrist):
         op = head_op_axes(head)
         torso = np.array([0.0, -0.35, 0.0])
-        wrist = pose(op, head[:3, 3] + op @ (torso + torso_to_wrist))
+        wrist = pose(head[:3, :3], head[:3, 3] + op @ (torso + torso_to_wrist))  # rigid + proper
         hands = {s: HandSample(tracked=True, wrist=wrist.copy(), landmarks=synthetic_webxr_hand(0.0)) for s in SIDES}
         return VRFrame(stamp=0.0, head=head, hands=hands)
 
@@ -511,7 +511,7 @@ def test_operator_debug_state_exposes_invariant_torso_vectors():
 
     def frame(head, torso_from_head, torso_to_wrist):
         op = head_op_axes(head)
-        wrist = pose(op, head[:3, 3] + op @ (torso_from_head + torso_to_wrist))
+        wrist = pose(head[:3, :3], head[:3, 3] + op @ (torso_from_head + torso_to_wrist))  # rigid + proper
         hands = {s: HandSample(tracked=True, wrist=wrist.copy(), landmarks=synthetic_webxr_hand(0.0)) for s in SIDES}
         return VRFrame(stamp=0.0, head=head, hands=hands)
 
@@ -1089,3 +1089,60 @@ if __name__ == "__main__":
             fail += 1
             print("FAIL", fn.__name__, "->", type(e).__name__, e)
     sys.exit(1 if fail else 0)
+
+
+def test_absolute_orientation_wears_hand_attitude_with_glide():
+    """orientation_mode=absolute: continuous at engage, and after the glide the
+    commanded EE attitude equals the operator's hand attitude mapped through the
+    body↔world axes and the derived hand↔EE convention — the overlay-overlap
+    guarantee — for both sides."""
+    from bimanual_teleop.arms.arm_control import ArmController
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.vr.calibrate import W_AXES, body_relative_hand_sample, head_op_axes
+    from bimanual_teleop.vr.frames import HandSample, euler_to_R, quat_to_R, rotvec
+
+    rig = load_rig()
+    assert rig["mapping"]["orientation_mode"] == "absolute"
+    head = np.eye(4)
+    head[:3, 3] = [0.0, 1.6, 0.0]
+    for side, lat in (("left", -0.22), ("right", 0.22)):
+        ac = ArmController(rig, side)
+        W = np.eye(4)
+        op = head_op_axes(head)
+        W[:3, :3] = euler_to_R([0.4, -0.2, 0.3])
+        torso_w = head[:3, 3] + op @ np.asarray(rig["vr"]["torso_from_head"])
+        W[:3, 3] = torso_w + op @ np.array([lat, 0.0, 0.42])
+        hs = body_relative_hand_sample(HandSample(tracked=True, wrist=W), head,
+                                       rig["vr"]["torso_from_head"])
+        # engage instant: command equals the current EE pose (no snap)
+        ac.update(hs, True, 0.0)
+        ee0 = ac.ik.fk_ee().rotation().as_matrix()
+        assert np.degrees(np.linalg.norm(rotvec(ac.cmd_R.T @ ee0))) < 5.0
+        # after the glide: command equals skeleton-attitude ∘ convention exactly
+        t = 0.0
+        for _ in range(int(4.0 * 120)):
+            t += 1 / 120
+            ac.update(hs, True, t)
+        M_w = W_AXES @ op.T @ W[:3, :3]
+        pred = quat_to_R(rig["arms"][side]["base_quat"]).T @ M_w @ ac.mapper.C
+        err = np.degrees(np.linalg.norm(rotvec(pred.T @ ac.cmd_R)))
+        assert err < 0.5, (side, err)
+
+
+def test_absolute_orientation_fails_closed_on_improper_ctrl_rotation():
+    """A reflection (det −1) in the ctrl sample must never reach the IK as a
+    target attitude: the mapper holds the anchor attitude instead."""
+    from bimanual_teleop.vr.frames import SE3, SO3, ClutchMapper, euler_to_R
+
+    C = euler_to_R([0.2, -0.3, 0.5])
+    m = ClutchMapper(np.diag([1.0, 1.0, -1.0]) @ euler_to_R([0.1, 0.2, 0.3]),  # improper R (body map)
+                     orientation_mode="absolute", hand_ee_convention=C)
+    A = euler_to_R([0.4, 0.1, -0.2])
+    ee = SE3.from_rotation_and_translation(SO3.from_matrix(A), np.array([0.3, 0.1, 0.5]))
+    proper = SE3.from_rotation_and_translation(SO3.from_matrix(euler_to_R([0.5, 0.0, 0.2])),
+                                               np.array([0.1, 0.2, 0.3]))
+    m.engage(proper, ee, t=0.0)
+    # PROPER ctrl with improper R*ctrl*C → improper target → must hold anchor
+    out = m.target(proper, 10.0).rotation().as_matrix()
+    assert np.allclose(out, A, atol=1e-12)
+    assert np.linalg.det(out) > 0

@@ -43,7 +43,9 @@ def make_frame(head: np.ndarray, torso_from_head: np.ndarray,
     op = head_op_axes(head)
     hands = {}
     for side in SIDES:
-        wrist = pose(op, head[:3, 3] + op @ (torso_from_head + torso_to_wrist[side]))
+        # RIGID body motion: the hand carries the head's rotation (a real hand
+        # attached to a turning body does), with a PROPER rotation matrix.
+        wrist = pose(head[:3, :3], head[:3, 3] + op @ (torso_from_head + torso_to_wrist[side]))
         hands[side] = HandSample(
             tracked=True,
             wrist=wrist,
