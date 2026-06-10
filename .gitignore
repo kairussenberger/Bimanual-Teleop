@@ -28,3 +28,6 @@ unity/TeleopRenderer/Logs/
 unity/TeleopRenderer/UserSettings/
 unity/TeleopRenderer/Build/
 unity/TeleopRenderer/Builds/
+
+# README media (exception to the *.gif / artifact ignores above)
+!docs/media/*
