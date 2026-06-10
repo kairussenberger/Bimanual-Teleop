@@ -3,6 +3,40 @@
 The repository has been reworked away from the old local MuJoCo simulator toward a
 headless body-relative teleop runtime with a Unity render stream.
 
+## 2026-06-10 (later) — Absolute Body-Anchored Position Mapping
+
+Operator feedback on the rendered replay: "this is all happening in front of me,
+yet the robot arms stay to the sides and down." Correct observation — position was
+clutch-RELATIVE, so the robot only mirrored displacements from its hanging rest.
+
+Change: `mapping.position_mode: absolute` (new default). The torso→wrist vector
+maps 1:1 (×`pos_scale`) onto the robot's chest→wrist vector; the chest anchor
+defaults to the arm-base midpoint dropped by `mapping.body_anchor_drop` (0.15 m —
+the plates are the shoulder line; the workspace, like a human's, is below it). On
+(re)engage the EE glides onto correspondence over `mapping.engage_blend_s` (no
+snap; displacement deltas map 1:1 from the first tick). Orientation stays
+relative-latched (the proven world-frame mapping). Legacy `body_relative: false`
+forces relative position mode.
+
+Enablers found while validating:
+- `ArmController` used to build its mapper with the legacy raw-WebXR basis and
+  relied on the engine to patch in the body-relative basis afterwards; it now
+  selects the right basis at construction (absolute mode made this load-bearing).
+- The conservative `ik.soft_margin` values (tuned around the hanging rest) made
+  the front-of-chest workspace unreachable — j1/j3/j5 pinned at their margins
+  0.4 m short of target. Margins re-sized from measured IK excursions over the
+  absolute workspace (max |q−home| ≈ [2.4, 0.65, 1.4, 0.5, 1.55, 0.5]) + headroom.
+- The anti-cross guard correctly pins a hand that crosses the body midline.
+
+Verification: 147 tests + full `verify_stack` pass (probes updated to settle the
+engage glide and to use reachable torso-height poses). `analyze_session` is now
+position-mode aware; on the real recording: windowed translation direction error
+1.9° median, magnitude ratio 1.03, **absolute correspondence |cmd − (chest +
+torso→wrist)| = 0.1 cm median (0.7 cm p90)**, orientation unchanged at 1.4°. The
+`render_session.py` side-by-side now shows both arms raised in front, matching
+the operator's hands. UNVERIFIED: live feel; reach-ceiling clamping when hands go
+far above the operator's chest is geometry-honest but worth feeling out.
+
 ## 2026-06-10 — Scrambled-Wrist Root Cause Found And Fixed (On Real Quest Data)
 
 Symptom (reported from live use): hand tracking is good and holding the hands

@@ -52,8 +52,13 @@ ik:
   max_vel: 12.0      # rad/s per joint — fast tracking (sim; tune down for real hardware)
   iters: 6           # IK steps per control tick — snappier convergence, less lag
   # SOFT joint limits = home ± this margin (rad). Caps each joint near home so the
-  # arm physically cannot fold into a buckle. Smaller = safer but less reach.
-  soft_margin: [1.4, 1.0, 1.4, 1.4, 1.5, 1.7]   # 6 joints (j6 = wrist roll)
+  # arm physically cannot fold into a buckle (the elbow floor below is the primary
+  # anti-buckle guard; hard limits always apply). Sized from measured IK excursions
+  # over the absolute-mapping front-of-body workspace (max |q-home| ≈
+  # [2.4, 0.65, 1.4, 0.5, 1.55, 0.5]) plus headroom — the old near-rest margins
+  # pinned j1/j3/j5 and made chest-height targets unreachable. Re-tighten for
+  # initial hardware sessions if desired.
+  soft_margin: [2.8, 1.6, 1.7, 1.4, 1.55, 1.7]   # 6 joints (j6 = wrist roll)
   # Human-plausible ELBOW (j3) floor: j3 bends both ways from its straightest (home),
   # but only +j3 is anatomical flexion; below this it swings the forearm outward into
   # the dislocated-looking "overextension". Validate with scripts/run_synthetic.py
@@ -62,10 +67,17 @@ ik:
   solver: daqp
 
 mapping:
-  # Relative + clutch SE(3): on engage, anchor current controller & EE poses;
-  # while engaged, EE target = anchor_ee ∘ scaled(relative controller motion).
-  # Orientation uses the SAME body→world axis map as translation (calibration-free):
+  # Position: 'absolute' maps your torso→wrist vector 1:1 (×pos_scale) onto the
+  # robot's chest→wrist vector — hands held in front of YOU put the robot's hands
+  # in front of IT. On (re)engage the arm GLIDES onto that correspondence over
+  # engage_blend_s (snap-free); displacements map 1:1 from the first instant.
+  # 'relative' = legacy clutch deltas about the engage anchor.
+  # Orientation always uses the SAME body→world axis map (calibration-free):
   # rotate your hand about a body axis and the EE rotates about the matching world axis.
+  position_mode: absolute
+  body_anchor_world: null   # robot chest point (world); null = midpoint of the arm bases, dropped by body_anchor_drop
+  body_anchor_drop: 0.15    # m below the base plates (shoulder line) for the default chest anchor
+  engage_blend_s: 1.0       # seconds to glide from the current EE onto the absolute target
   pos_scale: 1.0
   # Legacy manual mapper trim (euler xyz, rad). In body_relative mode the runtime
   # installs the measured body->base mapping at calibration time; leave these at zero

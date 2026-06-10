@@ -123,14 +123,14 @@ def main() -> int:
         cmd_axis_w = base_R @ (rv_ee / (np.linalg.norm(rv_ee) + 1e-12))
 
         # --- translation ------------------------------------------------------- #
-        # The mapper's anchor_ctrl is the body-frame torso→wrist vector at engage;
-        # recompute the current one the same way body_relative_hand_sample does.
+        # Body-frame torso→wrist vector, recomputed the same way
+        # body_relative_hand_sample does; compared post-hoc via windowed deltas so
+        # the scoring works for both 'absolute' (with its engage glide) and
+        # 'relative' position modes.
         op_axes = head_op_axes(frame.head)
         torso_w = frame.head[:3, 3] + op_axes @ np.asarray(rig["vr"]["torso_from_head"], float)
         ctrl_p = op_axes.T @ (W[:3, 3] - torso_w)
-        dp_body = ctrl_p - m.anchor_ctrl.translation()
-        want_dp_w = W_AXES @ dp_body
-        cmd_dp_w = base_R @ (arm.cmd_pos - anchor["ee_p"])
+        cmd_w = base_R @ arm.cmd_pos + np.asarray(rig["arms"][side]["base_pos"], float)
 
         # --- IK tracking (achieved vs commanded) ------------------------------- #
         ach_R = arm.ik.fk_ee().rotation().as_matrix()
@@ -138,14 +138,14 @@ def main() -> int:
 
         rows.append({
             "t": float(t[i] - t[0]),
+            "t_engage": anchor["t"] - float(t[0]),
             "hand_ang": hand_ang,
             "cmd_ang": cmd_ang,
             "axis_err": _angle_between(want_axis_w, cmd_axis_w),
             "want_axis": want_axis_w,
             "cmd_axis": cmd_axis_w,
-            "dp_dir_err": _angle_between(want_dp_w, cmd_dp_w),
-            "dp_ratio": float(np.linalg.norm(cmd_dp_w) / (np.linalg.norm(want_dp_w) + 1e-9)),
-            "dp_norm": float(np.linalg.norm(want_dp_w)),
+            "ctrl_p": ctrl_p,
+            "cmd_w": cmd_w,
             "ik_ori_err": ik_ori_err,
             "q": arm.ik.q,
         })
@@ -173,18 +173,43 @@ def main() -> int:
         ok_ori = True
         print("  (no frames exceeded --min-angle; orientation unscored)")
 
-    moved = [r for r in rows if r["dp_norm"] > 0.05]
-    print("\n---- TRANSLATION mapping (hand displacement → commanded EE displacement) ----")
-    if moved:
-        de = np.array([r["dp_dir_err"] for r in moved if np.isfinite(r["dp_dir_err"])])
-        dr = np.array([r["dp_ratio"] for r in moved])
-        print(f"  direction error:     median {np.median(de):6.1f}°   p90 {np.percentile(de, 90):6.1f}°")
-        print(f"  magnitude ratio:     median {np.median(dr):5.2f}    (clamps/filters can shrink it)")
+    mode = str(rig.get("mapping", {}).get("position_mode", "absolute"))
+    scale = float(rig.get("mapping", {}).get("pos_scale", 1.0))
+    blend = float(rig.get("mapping", {}).get("engage_blend_s", 1.0))
+    print(f"\n---- TRANSLATION mapping (position_mode={mode}) ----")
+    win = max(1, int(0.3 * len(rows) / max(rows[-1]["t"] - rows[0]["t"], 1e-6)))   # ~0.3 s
+    pairs = []
+    for i in range(len(rows) - win):
+        a, b = rows[i], rows[i + win]
+        d_want = scale * (W_AXES @ (b["ctrl_p"] - a["ctrl_p"]))
+        if np.linalg.norm(d_want) < 0.04:
+            continue
+        d_cmd = b["cmd_w"] - a["cmd_w"]
+        pairs.append((_angle_between(d_want, d_cmd),
+                      float(np.linalg.norm(d_cmd) / (np.linalg.norm(d_want) + 1e-9))))
+    if pairs:
+        de = np.array([p[0] for p in pairs if np.isfinite(p[0])])
+        dr = np.array([p[1] for p in pairs])
+        print(f"  windowed (0.3s) displacement direction error: median {np.median(de):6.1f}°   p90 {np.percentile(de, 90):6.1f}°")
+        print(f"  windowed magnitude ratio:                     median {np.median(dr):5.2f}   (clamps/filters can shrink it)")
         ok_pos = np.median(de) < 20.0
-        print(f"  VERDICT: {'OK' if ok_pos else 'BROKEN'}")
     else:
         ok_pos = True
-        print("  hand never moved >5cm from anchor; translation unscored")
+        print("  hand never displaced >4cm within a window; direction unscored")
+    if mode == "absolute":
+        anchor_w = rig["mapping"].get("body_anchor_world")
+        if anchor_w is None:
+            drop = float(rig["mapping"].get("body_anchor_drop", 0.15))
+            anchor_w = 0.5 * (np.asarray(rig["arms"]["left"]["base_pos"], float)
+                              + np.asarray(rig["arms"]["right"]["base_pos"], float)) - [0.0, 0.0, drop]
+        settled = [r for r in rows if r["t"] - r["t_engage"] > 2.0 * blend]
+        if settled:
+            err = np.array([np.linalg.norm(r["cmd_w"] - (np.asarray(anchor_w) + scale * (W_AXES @ r["ctrl_p"])))
+                            for r in settled])
+            print(f"  absolute correspondence |cmd − (chest + torso→wrist)|: median {np.median(err)*100:5.1f} cm  "
+                  f"p90 {np.percentile(err, 90)*100:5.1f} cm   (post-glide; workspace clamps add to this)")
+            ok_pos = ok_pos and np.median(err) < 0.10
+    print(f"  VERDICT: {'OK' if ok_pos else 'BROKEN'}")
 
     ik = np.array([r["ik_ori_err"] for r in rows])
     print("\n---- IK tracking (achieved vs commanded orientation) ----")

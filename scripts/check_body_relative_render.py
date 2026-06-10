@@ -66,9 +66,10 @@ def main() -> int:
     rig["vr"]["render_endpoint"] = f"inproc://body-relative-render-{uuid.uuid4()}"
     torso = np.asarray(rig["vr"]["torso_from_head"], dtype=float)
 
+    # Torso-height, own-side, forward — inside the absolute-mapping workspace.
     base_vec = {
-        "left": np.array([-0.22, 0.28, 0.48]),
-        "right": np.array([0.22, 0.28, 0.48]),
+        "left": np.array([-0.22, 0.0, 0.42]),
+        "right": np.array([0.22, 0.0, 0.42]),
     }
     lifted_vec = {side: vec + np.array([0.0, 0.16, 0.0]) for side, vec in base_vec.items()}
     head0 = pose(np.eye(3), [0.0, 1.6, 0.0])
@@ -79,17 +80,21 @@ def main() -> int:
     try:
         engine = TeleopEngine(rig, sink)
 
-        state0 = build(engine, sink, make_frame(head0, torso, base_vec, 0.0), engaged, 0.0)
+        # Settle the absolute-mode engage glide onto the static target first.
+        state0 = None
+        for i in range(480):
+            t = i / 120.0
+            state0 = build(engine, sink, make_frame(head0, torso, base_vec, t), engaged, t)
         cmd0 = {side: cmd_pos(state0, side) for side in SIDES}
 
         state_same = state0
-        for i in range(1, 50):
+        for i in range(480, 530):
             t = i / 120.0
             state_same = build(engine, sink, make_frame(head_moved, torso, base_vec, t), engaged, t)
         cmd_same = {side: cmd_pos(state_same, side) for side in SIDES}
 
         state_lift = state_same
-        for i in range(50, 190):
+        for i in range(530, 720):
             t = i / 120.0
             state_lift = build(engine, sink, make_frame(head_moved, torso, lifted_vec, t), engaged, t)
         cmd_lift = {side: cmd_pos(state_lift, side) for side in SIDES}

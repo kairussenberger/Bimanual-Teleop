@@ -65,6 +65,14 @@ def main() -> int:
     mapping = rig.get("mapping", {})
     pos_scale = float(mapping.get("pos_scale", float("nan")))
     require(np.isfinite(pos_scale) and pos_scale > 0.0, "mapping.pos_scale must be finite and positive")
+    require(mapping.get("position_mode") == "absolute",
+            "mapping.position_mode must default to 'absolute' — hands in front of the operator "
+            "put the robot's hands in front of the robot ('relative' is per-run diagnostics only)")
+    blend = float(mapping.get("engage_blend_s", float("nan")))
+    require(np.isfinite(blend) and blend >= 0.0, "mapping.engage_blend_s must be finite and >= 0")
+    anchor = mapping.get("body_anchor_world")
+    if anchor is not None:
+        check_vector("mapping.body_anchor_world", anchor, 3)
     for stale in ("abs_orientation", "ori_tweak_euler"):
         require(stale not in mapping,
                 f"mapping.{stale} is a removed knob — orientation now uses the calibration-free "

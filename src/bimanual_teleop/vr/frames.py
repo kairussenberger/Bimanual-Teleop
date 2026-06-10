@@ -235,18 +235,40 @@ def mat_to_se3(T: np.ndarray) -> SE3:
 
 
 class ClutchMapper:
-    """Relative+clutch wrist→EE mapping for one arm.
+    """Clutch wrist→EE mapping for one arm.
 
-    One contract for translation AND rotation: the wrist motion since engage,
-    measured in the ctrl frame, is re-expressed into the arm base frame by the
-    single constant `R` and applied about the anchor. No stance calibration.
+    ROTATION is always relative: the wrist rotation since engage, measured in the
+    ctrl frame, is re-expressed into the arm base frame by the single constant `R`
+    and applied about the anchor. No stance calibration.
+
+    POSITION has two modes:
+      - 'absolute' (default rig config): the operator's torso→wrist vector maps
+        1:1 (×scale) onto the robot's chest→wrist vector — hands held in front of
+        the operator put the robot's hands in front of the robot. `chest_base` is
+        the robot's chest/torso anchor in this arm's base frame. To stay snap-free,
+        the offset between the current EE and the absolute target is latched at
+        (re)engage and decays over `engage_blend_s` seconds, so the arm GLIDES
+        onto correspondence instead of jumping.
+      - 'relative': classic clutch deltas about the engage anchor (legacy, and the
+        only valid choice when ctrl is a raw room-frame pose).
     """
 
-    def __init__(self, R_base_from_vr: np.ndarray, pos_scale: float = 1.0):
+    def __init__(self, R_base_from_vr: np.ndarray, pos_scale: float = 1.0, *,
+                 position_mode: str = "relative", chest_base=None,
+                 engage_blend_s: float = 1.0):
+        if position_mode not in ("relative", "absolute"):
+            raise ValueError(f"position_mode must be 'relative' or 'absolute', got {position_mode!r}")
+        if position_mode == "absolute" and chest_base is None:
+            raise ValueError("absolute position_mode needs chest_base (robot chest in arm base frame)")
         self.R = np.asarray(R_base_from_vr, dtype=float).reshape(3, 3)
         self.scale = float(pos_scale)
+        self.mode = position_mode
+        self.chest = None if chest_base is None else np.asarray(chest_base, dtype=float).reshape(3)
+        self.blend_s = float(engage_blend_s)
         self.anchor_ctrl: SE3 | None = None
         self.anchor_ee: SE3 | None = None
+        self._blend_t0: float | None = None
+        self._blend_off = np.zeros(3)
 
     def set_R(self, R: np.ndarray) -> None:
         """Replace the ctrl→base rotation (legacy stance calibration only)."""
@@ -257,18 +279,35 @@ class ClutchMapper:
     def engaged(self) -> bool:
         return self.anchor_ctrl is not None
 
-    def engage(self, ctrl: SE3, ee: SE3) -> None:
+    def _p_abs(self, ctrl: SE3) -> np.ndarray:
+        return self.chest + self.scale * (self.R @ ctrl.translation())
+
+    def engage(self, ctrl: SE3, ee: SE3, t: float | None = None) -> None:
         """Latch position AND orientation anchors on the clutch rising edge, so the
-        target equals the current EE pose at the engage instant (no jump)."""
+        target equals the current EE pose at the engage instant (no jump). In
+        absolute mode also latch the EE−absolute offset; it decays from `t` over
+        `engage_blend_s` (t=None holds the offset until a timed target() call)."""
         self.anchor_ctrl = ctrl
         self.anchor_ee = ee
+        if self.mode == "absolute":
+            self._blend_off = ee.translation() - self._p_abs(ctrl)
+            self._blend_t0 = t
 
     def release(self) -> None:
         self.anchor_ctrl = None
         self.anchor_ee = None
+        self._blend_t0 = None
+        self._blend_off = np.zeros(3)
 
-    def target(self, ctrl: SE3) -> SE3:
+    def target(self, ctrl: SE3, t: float | None = None) -> SE3:
         """EE target (arm base frame) for the current wrist pose while engaged.
+
+        Position: absolute mode targets chest + scale·R·(torso→wrist), plus the
+        engage-latched offset decayed over `engage_blend_s` (exact at the engage
+        instant, ~5%% left after blend_s, → pure absolute). Hand displacements map
+        1:1 in BOTH modes — the blend offset is constant per engage, so deltas are
+        identical to relative mode. With t=None the offset is held un-decayed (the
+        runtime always passes t; un-timed calls stay snap-free).
 
         Orientation: the wrist rotation SINCE engage as a left/world-frame delta in
         the ctrl frame (D = R_now·R_anchorᵀ), conjugated into the arm base frame by
@@ -290,8 +329,15 @@ class ClutchMapper:
         measured at ~145° median axis error on a real Quest session.
         """
         assert self.anchor_ctrl is not None and self.anchor_ee is not None
-        dp_vr = ctrl.translation() - self.anchor_ctrl.translation()
-        p = self.anchor_ee.translation() + self.scale * (self.R @ dp_vr)
+        if self.mode == "absolute":
+            if t is None or self._blend_t0 is None:
+                k = 1.0
+            else:
+                k = float(np.exp(-3.0 * max(0.0, t - self._blend_t0) / max(self.blend_s, 1e-6)))
+            p = self._p_abs(ctrl) + k * self._blend_off
+        else:
+            dp_vr = ctrl.translation() - self.anchor_ctrl.translation()
+            p = self.anchor_ee.translation() + self.scale * (self.R @ dp_vr)
         dR = ctrl.rotation().as_matrix() @ self.anchor_ctrl.rotation().as_matrix().T
         Rt = (self.R @ dR @ self.R.T) @ self.anchor_ee.rotation().as_matrix()
         return SE3.from_rotation_and_translation(SO3.from_matrix(Rt), p)

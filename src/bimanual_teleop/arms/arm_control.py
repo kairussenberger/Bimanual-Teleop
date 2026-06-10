@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..filters import OneEuroFilter
+from ..vr.calibrate import R_base_from_body
 from ..vr.frames import SE3, ClutchMapper, HandSample, mat_to_se3, quat_to_R, r_base_from_vr
 from .ik import ArmIK
 
@@ -19,15 +20,40 @@ class ArmController:
         self.side = side
         self.ik = ArmIK(rig, side)
         m = rig["mapping"]
-        # Frame derived from THIS arm's real base orientation so "hand forward" →
-        # "robot reaches forward" (not sideways). Calibration overrides this via
-        # mapper.set_R(). tweak = optional per-side nudge.
-        R = r_base_from_vr(rig["arms"][side]["base_quat"], m["r_base_from_vr_euler"][side])
-        self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"])
-        # Anti-cross guard: keep this hand on its own side of the world Y axis so
-        # the two arms can never overlap. left stays y ≤ -gap, right stays y ≥ +gap.
+        body_relative = bool(rig.get("vr", {}).get("body_relative", True))
+        # The mapper R must match the frame the ctrl samples actually live in:
+        # body axes (default) or legacy raw WebXR room coords. Built here, not
+        # patched in later by the engine, because the absolute position mapping
+        # depends on it from the very first engage.
+        if body_relative:
+            R = R_base_from_body(rig["arms"][side]["base_quat"])
+        else:
+            R = r_base_from_vr(rig["arms"][side]["base_quat"], m["r_base_from_vr_euler"][side])
         self.base_R = quat_to_R(rig["arms"][side]["base_quat"])   # base → world
         self.base_pos = np.asarray(rig["arms"][side]["base_pos"], dtype=float)
+        # Absolute position mapping: operator torso→wrist lands 1:1 on robot
+        # chest→wrist. The chest anchor defaults to the midpoint of the two arm
+        # bases; absolute only makes sense for body-relative ctrl samples, so the
+        # legacy raw-room mode falls back to clutch deltas.
+        mode = str(m.get("position_mode", "absolute"))
+        if not body_relative:
+            mode = "relative"
+        anchor_w = m.get("body_anchor_world")
+        if anchor_w is None:
+            # The base plates are the SHOULDER line; the operator's torso proxy is
+            # sternum-ish, below their shoulders — and the YAM workspace, like a
+            # human arm's, lives below the shoulder mounts. Drop the chest anchor
+            # accordingly so torso-height hands land in reachable space.
+            drop = float(m.get("body_anchor_drop", 0.15))
+            anchor_w = 0.5 * (np.asarray(rig["arms"]["left"]["base_pos"], dtype=float)
+                              + np.asarray(rig["arms"]["right"]["base_pos"], dtype=float)) \
+                - np.array([0.0, 0.0, drop])
+        chest_base = self.base_R.T @ (np.asarray(anchor_w, dtype=float) - self.base_pos)
+        self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"], position_mode=mode,
+                                   chest_base=chest_base if mode == "absolute" else None,
+                                   engage_blend_s=float(m.get("engage_blend_s", 1.0)))
+        # Anti-cross guard: keep this hand on its own side of the world Y axis so
+        # the two arms can never overlap. left stays y ≤ -gap, right stays y ≥ +gap.
         gap = float(rig.get("vr", {}).get("cross_gap", 0.05))
         self.y_bound = -gap if side == "left" else gap
         ws = rig["safety"]["workspace"]
@@ -54,14 +80,14 @@ class ArmController:
             # anchor POSITION to the wrist site, ORIENTATION to the hand
             anchor = SE3.from_rotation_and_translation(
                 self.ik.fk_ee().rotation(), self.ik.fk_wrist().translation())
-            self.mapper.engage(mat_to_se3(hand.wrist), anchor)
+            self.mapper.engage(mat_to_se3(hand.wrist), anchor, t)
             self.pos_filt = OneEuroFilter(**self._filt_params)   # reset smoothing on engage
         if not active and self._was_engaged:                 # release
             self.mapper.release()
         self._was_engaged = active
 
         if active:
-            target = self.mapper.target(mat_to_se3(hand.wrist))
+            target = self.mapper.target(mat_to_se3(hand.wrist), t)
             p = np.clip(target.translation(), self.ws_min, self.ws_max)  # workspace box
             sm = self.pos_filt({"x": p[0], "y": p[1], "z": p[2]}, t)     # One-Euro
             pb = np.array([sm["x"], sm["y"], sm["z"]])                   # target in base frame

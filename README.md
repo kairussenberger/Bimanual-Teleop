@@ -219,24 +219,29 @@ the programmatic Pinocchio model.
 ## Motion Mapping (Calibration-Free)
 
 There is no startup calibration ritual. Put the headset on, get tracked, and the
-arms follow under one contract for translation AND rotation:
+arms follow under one mental model:
 
-> Move or rotate your hand relative to your BODY axes (right/up/forward, from the
-> headset pose) and the EE moves or rotates about the corresponding robot WORLD
-> axes (+Y/+Z/−X) by the same amount, relative to where it was when the clutch
-> engaged.
+> The robot's chest is your torso. WHERE your hand is relative to your torso is
+> where the robot's hand goes relative to its chest (absolute, 1:1). HOW your
+> hand rotates relative to your body axes is how the EE rotates about the robot
+> world axes (relative to clutch-engage).
 
-Translation: arm control sees the torso-to-wrist vector `[right, up, forward]`
-(headset pose + `vr.torso_from_head`), so absolute room offsets and whole-body/head
-translations and turns cancel — lifting your hand lifts the arm, walking around
-does nothing. Rotation: the wrist rotation since clutch-engage is conjugated by the
-same body→world axis map and applied to the anchored EE orientation in the world
-frame — roll→roll, pitch→pitch, yaw→yaw from ANY starting pose. The previous design
-inferred a hand↔EE axis correspondence from a 5-second arms-at-sides hold; done
-imperfectly (always), it scrambled every rotation axis (~145° median axis error on
-a real session — see `scripts/analyze_session.py`). `vr.calib_seconds` now defaults
-to 0; setting it >0 re-enables the legacy stillness hold, which only steers arm
-motion when `vr.body_relative` is explicitly disabled for diagnostics.
+Position: arm control sees the torso-to-wrist vector `[right, up, forward]`
+(headset pose + `vr.torso_from_head`) and targets the robot chest anchor plus that
+vector (`mapping.position_mode: absolute`) — hands held in front of YOU are hands
+in front of IT, lifting your hand lifts the arm, and walking/turning your body
+does nothing. On (re)engage the arm glides onto correspondence over
+`mapping.engage_blend_s` seconds instead of snapping. Targets beyond the YAM's
+reach (e.g. far above its shoulder-mounted bases) are clamped — the arm tracks
+your height as far as its geometry allows. Rotation: the wrist rotation since
+clutch-engage is conjugated by the same body→world axis map and applied to the
+anchored EE orientation in the world frame — roll→roll, pitch→pitch, yaw→yaw from
+ANY starting pose. The previous design inferred a hand↔EE axis correspondence from
+a 5-second arms-at-sides hold; done imperfectly (always), it scrambled every
+rotation axis (~145° median axis error on a real session — see
+`scripts/analyze_session.py`). `vr.calib_seconds` now defaults to 0; setting it >0
+re-enables the legacy stillness hold, which only steers arm motion when
+`vr.body_relative` is explicitly disabled for diagnostics.
 
 The arm mapping path is:
 

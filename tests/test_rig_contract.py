@@ -76,6 +76,16 @@ def test_rig_contract_rejects_bad_mapping_defaults(monkeypatch):
         contract.main()
 
 
+def test_rig_contract_rejects_relative_default_position_mode(monkeypatch):
+    contract = _load_contract()
+    rig = copy.deepcopy(load_rig())
+    rig["mapping"]["position_mode"] = "relative"
+    monkeypatch.setattr(contract, "load_rig", lambda: rig)
+
+    with pytest.raises(AssertionError, match="position_mode"):
+        contract.main()
+
+
 def test_rig_contract_rejects_nonzero_default_calib_seconds(monkeypatch):
     contract = _load_contract()
     rig = copy.deepcopy(load_rig())

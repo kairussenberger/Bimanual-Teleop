@@ -69,9 +69,11 @@ def main() -> int:
     rig["vr"]["torso_from_head"] = [0.0, -0.35, 0.0]
     torso = np.asarray(rig["vr"]["torso_from_head"], dtype=float)
 
+    # Torso-height, own-side, forward — inside the absolute-mapping workspace the
+    # YAM can actually reach (it cannot follow far above its base plates).
     base_vec = {
-        "left": np.array([-0.22, 0.28, 0.48]),
-        "right": np.array([0.22, 0.28, 0.48]),
+        "left": np.array([-0.22, 0.0, 0.42]),
+        "right": np.array([0.22, 0.0, 0.42]),
     }
     lifted_vec = {side: vec + np.array([0.0, 0.16, 0.0]) for side, vec in base_vec.items()}
     head0 = pose(np.eye(3), [0.0, 1.6, 0.0])
@@ -91,12 +93,14 @@ def main() -> int:
     engine = TeleopEngine(rig, sink)
     engaged = {side: True for side in SIDES}
 
-    engine.tick(frame0, engaged, 0.0)
+    # Settle the absolute-mode engage glide + IK onto the static target first.
+    for i in range(480):
+        engine.tick(frame0, engaged, i / 120.0)
     p0 = {side: wrist_world(engine, side).copy() for side in SIDES}
 
     # Move/yaw the headset but keep the torso-to-wrist vector unchanged. The arm
     # should stay anchored because body-relative mapping cancels whole-body motion.
-    for i in range(1, 40):
+    for i in range(480, 520):
         engine.tick(frame_moved, engaged, i / 120.0)
     p_same = {side: wrist_world(engine, side).copy() for side in SIDES}
     for side in SIDES:
@@ -106,7 +110,7 @@ def main() -> int:
 
     # Lift both wrists relative to the torso. In robot world, this must increase Z.
     frame_lifted = make_frame(head_moved, torso, lifted_vec)
-    for i in range(40, 180):
+    for i in range(520, 760):
         engine.tick(frame_lifted, engaged, i / 120.0)
     p_lift = {side: wrist_world(engine, side).copy() for side in SIDES}
     for side in SIDES:

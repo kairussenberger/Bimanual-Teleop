@@ -37,14 +37,25 @@ The Unity render stream exposes the same vector at
 `render.state.op.hands.*.wrist_body` so the operator overlay and the robot arm
 state can be compared directly.
 
-## Orientation Mapping Contract
+## Motion Mapping Contract
 
-EE orientation is CALIBRATION-FREE and uses the same body→world axis map as
-translation (`ClutchMapper.target`): the wrist rotation since clutch-engage,
-measured in body axes, is applied to the anchored EE orientation about the
-corresponding robot-world axes — rotate your hand θ about body-forward and the EE
-rotates θ about world −X, from any starting pose. `vr.calib_seconds` defaults to 0;
-the legacy stance hold only steers arms when `vr.body_relative` is false.
+POSITION is ABSOLUTE and body-anchored (`mapping.position_mode: absolute`): the
+operator's torso→wrist vector maps 1:1 (×`pos_scale`) onto the robot's
+chest→wrist vector, where the chest anchor defaults to the midpoint of the arm
+bases dropped by `body_anchor_drop`. Hands held in front of the operator put the
+robot's wrists in front of the robot — verified at 0.1 cm median correspondence
+on a real session. On (re)engage the EE GLIDES onto correspondence over
+`mapping.engage_blend_s` (continuous at the engage instant; displacements map 1:1
+from the first tick). The `ik.soft_margin` values are sized so this front-of-body
+workspace is reachable — re-tightening them below the measured excursions in
+config/rig.yaml's comment will pin the arm short of its targets again.
+
+EE ORIENTATION is CALIBRATION-FREE and uses the same body→world axis map
+(`ClutchMapper.target`): the wrist rotation since clutch-engage, measured in body
+axes, is applied to the anchored EE orientation about the corresponding
+robot-world axes — rotate your hand θ about body-forward and the EE rotates θ
+about world −X, from any starting pose. `vr.calib_seconds` defaults to 0; the
+legacy stance hold only steers arms when `vr.body_relative` is false.
 
 Do not reintroduce a stance-calibrated hand-local↔EE-local correspondence: an
 imperfect calibration pose scrambles every commanded rotation axis (measured 145°

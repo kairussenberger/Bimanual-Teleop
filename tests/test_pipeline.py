@@ -132,6 +132,63 @@ def test_clutch_release_disengages_immediately():
     assert not sup.update(fr2, 100.05)["left"]   # immediate, NOT after hold_s
 
 
+def test_absolute_position_glides_to_chest_correspondence():
+    """Absolute mode: the target is chest + R·(torso→wrist) — continuous at the
+    engage instant (offset latched), converged onto correspondence after the blend,
+    and displacement deltas map 1:1 from the first instant in both modes."""
+    from bimanual_teleop.vr.frames import SE3, ClutchMapper
+    chest = np.array([0.1, -0.2, 0.4])
+    m = ClutchMapper(np.eye(3), pos_scale=1.0, position_mode="absolute",
+                     chest_base=chest, engage_blend_s=0.5)
+    ee = SE3.from_translation(np.array([0.3, 0.1, 0.5]))
+    ctrl0 = SE3.from_translation(np.array([0.05, 0.0, 0.45]))     # torso→wrist (body axes)
+    m.engage(ctrl0, ee, t=10.0)
+    # engage instant: exactly the current EE (no snap)
+    assert np.allclose(m.target(ctrl0, 10.0).translation(), ee.translation(), atol=1e-9)
+    # displacement maps 1:1 immediately (blend offset is constant per engage)
+    ctrl1 = SE3.from_translation(ctrl0.translation() + [0.07, 0.0, 0.0])
+    d = m.target(ctrl1, 10.0).translation() - m.target(ctrl0, 10.0).translation()
+    assert np.allclose(d, [0.07, 0, 0], atol=1e-9)
+    # long after the blend: pure absolute correspondence
+    assert np.allclose(m.target(ctrl0, 20.0).translation(), chest + ctrl0.translation(), atol=1e-6)
+
+
+def test_absolute_hands_in_front_put_robot_hands_in_front():
+    """The complaint this mode fixes: operator holds BOTH hands out in front of
+    their torso, so the robot's wrists must end up IN FRONT of the robot (world −X
+    of the chest anchor) at comparable height — not hanging at its sides."""
+    from bimanual_teleop.arms.arm_control import ArmController
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.vr.calibrate import body_relative_hand_sample, head_op_axes
+    from bimanual_teleop.vr.frames import HandSample, quat_to_R
+
+    rig = load_rig()
+    assert rig["mapping"]["position_mode"] == "absolute"
+    head = np.eye(4)
+    head[:3, 3] = [0.0, 1.6, 0.0]
+    anchor_w = 0.5 * (np.asarray(rig["arms"]["left"]["base_pos"])
+                      + np.asarray(rig["arms"]["right"]["base_pos"])) \
+        - np.array([0.0, 0.0, float(rig["mapping"].get("body_anchor_drop", 0.15))])
+    for side, lateral in (("left", -0.22), ("right", 0.22)):
+        ac = ArmController(rig, side)
+        wrist_body = np.array([lateral, 0.05, 0.42])      # in front, near chest height
+        W = np.eye(4)
+        op = head_op_axes(head)
+        torso_w = head[:3, 3] + op @ np.asarray(rig["vr"]["torso_from_head"])
+        W[:3, 3] = torso_w + op @ wrist_body
+        hs = body_relative_hand_sample(HandSample(tracked=True, wrist=W), head,
+                                       rig["vr"]["torso_from_head"])
+        t = 0.0
+        for _ in range(int(4.0 * 120)):                    # well past the engage blend
+            t += 1 / 120
+            ac.update(hs, True, t)
+        cmd_w = quat_to_R(rig["arms"][side]["base_quat"]) @ ac.cmd_pos \
+            + np.asarray(rig["arms"][side]["base_pos"])
+        assert cmd_w[0] < anchor_w[0] - 0.25, (side, cmd_w)        # in FRONT (−X)
+        assert abs(cmd_w[2] - (anchor_w[2] + 0.05)) < 0.12, (side, cmd_w)  # chest height
+        assert (cmd_w[1] < 0) == (side == "left"), (side, cmd_w)   # own side
+
+
 def test_orientation_continuous_at_engage():
     """The target must equal the anchored EE pose at the engage instant
     (the ~157° wrist snap the review caught)."""
@@ -372,19 +429,25 @@ def test_engine_body_motion_does_not_drive_arm_but_hand_lift_does():
     engine = TeleopEngine(rig, Sink())
     engaged = {s: True for s in SIDES}
 
-    torso_to_wrist = np.array([0.22, 0.28, 0.48])
+    # A reachable working pose for the LEFT arm under absolute mapping: on the
+    # left side of the torso (the anti-cross guard correctly pins a left hand
+    # that crosses center), at torso height (the YAM cannot reach far above its
+    # base plates), forward where a +16 cm lift stays followable.
+    torso_to_wrist = np.array([-0.22, 0.0, 0.40])
     head0 = pose(np.eye(3), [0.0, 1.6, 0.0])
-    engine.tick(frame(head0, torso_to_wrist), engaged, 0.0)
+    # settle the absolute-mode engage glide + IK onto the static target first
+    for i in range(480):
+        engine.tick(frame(head0, torso_to_wrist), engaged, i / 120.0)
     p0 = engine.arm["left"].ik.fk_wrist().translation()
 
     head_moved = pose(euler_to_R([0.0, 0.6, 0.0]), [0.35, 1.72, -0.25])
-    for i in range(1, 40):
+    for i in range(480, 520):
         engine.tick(frame(head_moved, torso_to_wrist), engaged, i / 120.0)
     p_same = engine.arm["left"].ik.fk_wrist().translation()
     assert np.linalg.norm(p_same - p0) < 1e-4
 
     lifted = torso_to_wrist + np.array([0.0, 0.16, 0.0])
-    for i in range(40, 160):
+    for i in range(520, 760):
         engine.tick(frame(head_moved, lifted), engaged, i / 120.0)
     p_lift = engine.arm["left"].ik.fk_wrist().translation()
     assert np.linalg.norm(p_lift - p_same) > 0.02
@@ -677,6 +740,7 @@ def test_calibration_aligns_forward_and_no_cross():
     lm[9] = [0.03, 0, -0.15]; lm[14] = [0, 0, -0.16]; lm[19] = [-0.01, 0, -0.15]
     wm = lambda p: np.block([[np.eye(3), np.array(p).reshape(3, 1)], [0, 0, 0, 1]])
     rig = load_rig()
+    rig["vr"]["body_relative"] = False      # this is the LEGACY raw-room mapping under test
     for side, sign in (("left", -1), ("right", +1)):
         ac = ArmController(rig, side)
         ac.mapper.set_R(calibrate_R(lm, rig["arms"][side]["base_quat"]))
@@ -724,7 +788,7 @@ def test_end_to_end_render_tick():
     src = FakeVRSource()
     time.sleep(0.2)  # PUB/SUB slow-joiner
     ee0 = engine.arm["left"].ik.fk_ee().translation().copy()
-    for i in range(120):
+    for i in range(240):                     # past the absolute-mode engage glide
         t = i / 60.0
         frame = src.frame_at(t)
         eng = {s: True for s in SIDES}
@@ -736,7 +800,10 @@ def test_end_to_end_render_tick():
     assert len(st["arms"]["left"]["link_pos"]) == 24
     assert len(st["arms"]["left"]["cmd_pos"]) == 3
     assert np.all(np.isfinite(st["arms"]["left"]["cmd_pos"]))
-    assert np.linalg.norm(np.asarray(st["arms"]["left"]["cmd_pos"]) - np.asarray(st["arms"]["left"]["ee_pos"])) < 0.25
+    # absolute mode parks cmd at the operator's (clamped) target even when the
+    # fake source holds its hands beyond the YAM's reach ceiling, so the
+    # cmd-vs-achieved gap is bounded by workspace geometry, not ~0.
+    assert np.linalg.norm(np.asarray(st["arms"]["left"]["cmd_pos"]) - np.asarray(st["arms"]["left"]["ee_pos"])) < 0.7
     assert len(st["hand_render"]["left"]["names"]) == 17
     assert len(st["hand_render"]["left"]["q"]) == 17
     assert st["status"]["engaged"]["left"] is True
