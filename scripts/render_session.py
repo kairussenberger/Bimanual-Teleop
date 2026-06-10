@@ -35,7 +35,9 @@ from bimanual_teleop.vr.frames import quat_to_R, rotvec              # noqa: E40
 from bimanual_teleop.vr.replay import ReplaySource                   # noqa: E402
 
 from bimanual_teleop.viz.hand_geom import hand_basis_for_side, orca_hand_tris_ee  # noqa: E402
-from bimanual_teleop.viz.yam_meshes import load_arm_meshes, load_stand_meshes, world_tris  # noqa: E402
+from bimanual_teleop.viz.yam_meshes import (  # noqa: E402
+    geom_transforms, load_arm_meshes, load_orca_hand, load_stand_meshes,
+    orca_description_available, orca_q_from_degrees, world_tris)
 
 # WebXR 25-joint finger chains (W3C order), wrist = 0
 FINGER_CHAINS = [([0, 1, 2, 3, 4], "#d4699e"), ([0, 5, 6, 7, 8, 9], "#4a90d9"),
@@ -124,9 +126,13 @@ def make_renderer(rig: dict, frames: list, fig, debug_links: bool = False):
     from bimanual_teleop.arms.ik import ArmIK
     from bimanual_teleop.vr.frames import quat_to_R as _q2R
     hand_basis = {}
+    orca = {}
     for s in SIDES:
-        ikb = ArmIK(rig, s)
-        hand_basis[s] = hand_basis_for_side(ikb, _q2R(rig["arms"][s]["base_quat"]), s)
+        if orca_description_available():
+            orca[s] = load_orca_hand(s, 400)        # the REAL ORCA hand model
+        else:
+            ikb = ArmIK(rig, s)
+            hand_basis[s] = hand_basis_for_side(ikb, _q2R(rig["arms"][s]["base_quat"]), s)
     base_T = {}
     for s in SIDES:
         T = np.eye(4)
@@ -170,10 +176,18 @@ def make_renderer(rig: dict, frames: list, fig, debug_links: bool = False):
                     tw, facecolors=shaded_colors(tw, ARM_RGB[s]), edgecolors="none"))
             if f.get("hand_q", {}).get(s) is not None and f.get("ee_T", {}).get(s) is not None:
                 Th = f["ee_T"][s]
-                ht = orca_hand_tris_ee(f["hand_q"][s], hand_basis[s], mirror=(s == "left"))
-                ht = ht @ Th[:3, :3].T + Th[:3, 3]
-                axr.add_collection3d(Poly3DCollection(
-                    ht, facecolors=shaded_colors(ht, (0.82, 0.77, 0.70)), edgecolors="none"))
+                if s in orca:
+                    hmodel, hdata, hitems = orca[s]
+                    qh = orca_q_from_degrees(hmodel, f["hand_q"][s], s)
+                    for it, T in zip(hitems, geom_transforms(hmodel, hdata, hitems, qh, Th), strict=True):
+                        tw = it["tris"] @ T[:3, :3].T + T[:3, 3]
+                        axr.add_collection3d(Poly3DCollection(
+                            tw, facecolors=shaded_colors(tw, it["rgb"]), edgecolors="none"))
+                else:
+                    ht = orca_hand_tris_ee(f["hand_q"][s], hand_basis[s], mirror=(s == "left"))
+                    ht = ht @ Th[:3, :3].T + Th[:3, 3]
+                    axr.add_collection3d(Poly3DCollection(
+                        ht, facecolors=shaded_colors(ht, (0.82, 0.77, 0.70)), edgecolors="none"))
             T_ee = base_T[s] @ data.oMi[model.njoints - 1].homogeneous
             for k, c in enumerate(TRIAD_RGB):
                 v = T_ee[:3, 3] + 0.11 * T_ee[:3, k]

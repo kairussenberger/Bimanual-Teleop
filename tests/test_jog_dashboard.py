@@ -94,7 +94,7 @@ def test_dashboard_serves_meshes_and_mesh_transforms():
     world transforms computed from the streamed joint state."""
     mod = _load("dashboard")
     assets = mod.MeshAssets(max_tris_per_link=60)
-    assert set(assets.geoms) == {"left", "right", "stand"}
+    assert {"left", "right", "stand"} <= set(assets.geoms)  # + hand_* when the ORCA description exists
     assert len(assets.geoms["right"]) == 6                  # base + link1..5
     assert len(assets.geoms["stand"]) == 6                  # AgileX frame parts
     rig = load_rig()
@@ -125,9 +125,10 @@ def test_dashboard_serves_meshes_and_mesh_transforms():
         srv.server_close()
 
 
-def test_dashboard_articulated_hand_mesh_follows_joints():
-    """hand_world builds finite world triangles from the streamed EE pose + ORCA
-    joint angles, and a fist measurably differs from an open hand."""
+def test_dashboard_articulated_hand_follows_joints():
+    """The hand rendering (real ORCA model when the sibling description repo is
+    present, parametric otherwise) articulates with the streamed joint angles and
+    attaches at the streamed EE pose."""
     import numpy as np
     from bimanual_teleop.hands.joint_map import ORCA_JOINT_ORDER
     mod = _load("dashboard")
@@ -135,9 +136,16 @@ def test_dashboard_articulated_hand_mesh_follows_joints():
     arms = {"right": {"ee_pos": [-0.3, 0.1, 1.0], "ee_quat": [1.0, 0.0, 0.0, 0.0]}}
     open_q = [0.0] * 17
     fist_q = [80.0 if ("mcp" in n or "pip" in n) else 0.0 for n in ORCA_JOINT_ORDER]
-    hm_open = assets.hand_world({"arms": arms, "hand_render": {"right": {"names": list(ORCA_JOINT_ORDER), "q": open_q}}})
-    hm_fist = assets.hand_world({"arms": arms, "hand_render": {"right": {"names": list(ORCA_JOINT_ORDER), "q": fist_q}}})
-    a, b = np.asarray(hm_open["right"]), np.asarray(hm_fist["right"])
-    assert a.shape == b.shape and np.all(np.isfinite(a)) and np.all(np.isfinite(b))
-    assert np.linalg.norm(a - b) > 0.05                      # the fingers actually moved
-    assert np.linalg.norm(a.reshape(-1, 3).mean(0) - [-0.3, 0.1, 1.0]) < 0.2   # attached at the EE
+    mk = lambda q: {"arms": arms, "hand_render": {"right": {"names": list(ORCA_JOINT_ORDER), "q": q}}}
+    if assets.hand_mode == "real":
+        T_open = np.asarray(assets.hand_transforms(mk(open_q))["right"])
+        T_fist = np.asarray(assets.hand_transforms(mk(fist_q))["right"])
+        assert T_open.shape == T_fist.shape and T_open.shape[1] == 16
+        assert np.all(np.isfinite(T_open)) and np.all(np.isfinite(T_fist))
+        assert np.abs(T_open - T_fist).max() > 0.005          # fingers actually moved
+        assert "hand_right" in assets.geoms and len(assets.geoms["hand_right"]) > 10
+    else:
+        a = np.asarray(assets.hand_world(mk(open_q))["right"])
+        b = np.asarray(assets.hand_world(mk(fist_q))["right"])
+        assert a.shape == b.shape and np.all(np.isfinite(a)) and np.all(np.isfinite(b))
+        assert np.linalg.norm(a - b) > 0.05

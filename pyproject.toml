@@ -21,7 +21,9 @@ vr = ["vuer>=0.0.32"]
 # Telemetry backbone (spec Section 6): live 3D-transform + scalar-timeseries
 # dashboard. Optional so the core runtime stays lean and headless CI needs nothing
 # extra; viz/rerun_log.py degrades to a no-op when it is absent.
-telemetry = ["rerun-sdk>=0.20"]
+# fast-simplification: quadric mesh decimation for the dense ORCA hand STLs in
+# the dashboard/GIF renderers (graceful fallback to crude decimation if absent).
+telemetry = ["rerun-sdk>=0.20", "fast-simplification>=0.1.7"]
 # Real YAM arms are Linux-only (SocketCAN). Install the i2rt SDK manually on the Linux host:
 #   git clone https://github.com/i2rt-robotics/i2rt && uv pip install -e i2rt   (Ubuntu, Python 3.11)
 # hardware = ["i2rt"]   # not on PyPI; see README "Hardware day".

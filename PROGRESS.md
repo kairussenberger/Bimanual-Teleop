@@ -3,6 +3,32 @@
 The repository has been reworked away from the old local MuJoCo simulator toward a
 headless body-relative teleop runtime with a Unity render stream.
 
+## 2026-06-10 (real ORCA hands)
+
+Operator pushback ("don't you have a model of the orca hands? that is not the
+model") was justified: the official description lives in the SIBLING repo
+`~/Developer/orcahand_description` (v2 MJCF body fragments + per-side STL sets —
+the same split-file pattern as the YAM sources, i.e. from the same original
+scene). The earlier "no meshes exist" conclusion came from searching only inside
+`orca_core` — lesson recorded: search the whole Developer tree before concluding
+an asset is missing.
+
+- `viz/yam_meshes.load_orca_hand`: synthesizes a loadable MJCF per side (assets
+  + body fragment, materials stripped, paths absolutized), 30 visual geoms, 17
+  joints whose names are exactly `<side>_<orca_to_sim_short(name)>` — this
+  repo's joint_map was built for these models. `orca_q_from_degrees` maps the
+  streamed 17 hardware angles (degrees) onto the model (radians, limit-clamped).
+- Dense organic shells (8k–100k tris each) defeat largest-face decimation, so
+  `simplify()` does quadric decimation via the optional `fast-simplification`
+  dep (telemetry extra), disk-cached per mesh; crude fallback when absent.
+- Dashboard ships hand geometry once via /meshes (with per-geom skin/structure
+  colors) and per-state finger FK transforms (`hand_T`); render_session draws
+  the same models per frame. The parametric hand (`viz/hand_geom`) remains only
+  as a fallback when the description repo is absent.
+
+163 tests + verify_stack pass; dashboard screenshot-verified with the real
+hands articulating on the looping recording.
+
 ## 2026-06-10 (intrinsic twist + full-robot render)
 
 Operator feedback: position perfect, but "the wrist still gets into singularities
