@@ -537,7 +537,7 @@ def test_operator_debug_state_no_frame_is_fixed_shape_untracked():
     assert op["torso_pos"] is None
     assert set(op["hands"]) == set(SIDES)
     for side in SIDES:
-        assert op["hands"][side] == {"tracked": False, "wrist_body": None, "raw_wrist": None}
+        assert op["hands"][side] == {"tracked": False, "wrist_body": None, "raw_wrist": None, "lm_body": None}
 
 
 def test_operator_debug_state_rejects_non_finite_pose_matrices():
@@ -564,7 +564,7 @@ def test_operator_debug_state_rejects_non_finite_pose_matrices():
     )
 
     op = operator_debug_state(frame, [0.0, -0.35, 0.0])
-    assert op["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None}
+    assert op["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None, "lm_body": None}
     assert op["hands"]["right"]["tracked"] is True
     assert len(op["hands"]["right"]["wrist_body"]) == 3
     json.dumps(op, allow_nan=False)
@@ -575,7 +575,7 @@ def test_operator_debug_state_rejects_non_finite_pose_matrices():
     assert op["head_pos"] is None
     assert op["torso_pos"] is None
     assert set(op["hands"]) == set(SIDES)
-    assert op["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None}
+    assert op["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None, "lm_body": None}
     assert op["hands"]["right"]["tracked"] is False
     assert op["hands"]["right"]["wrist_body"] is None
     assert op["hands"]["right"]["raw_wrist"] == [0.2, 1.3, -0.4]
@@ -686,7 +686,7 @@ def test_render_state_marks_body_relative_hand_untracked_with_non_finite_wrist()
     assert state["status"]["tracked"]["left"] is False
     assert state["arms"]["left"]["cmd_pos"] is None
     assert state["arms"]["left"]["cmd_quat"] is None
-    assert state["op"]["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None}
+    assert state["op"]["hands"]["left"] == {"tracked": False, "wrist_body": None, "raw_wrist": None, "lm_body": None}
     sink.close()
 
 

@@ -87,3 +87,38 @@ def test_dashboard_serves_injected_state():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_dashboard_serves_meshes_and_mesh_transforms():
+    """/meshes returns per-side triangle soups and /state carries live per-geom
+    world transforms computed from the streamed joint state."""
+    mod = _load("dashboard")
+    assets = mod.MeshAssets(max_tris_per_link=60)
+    assert set(assets.geoms) == {"left", "right"}
+    assert len(assets.geoms["right"]) == 6                  # base + link1..5
+    rig = load_rig()
+    q = list(rig["arms"]["right"]["neutral_q"])
+    T = assets.transforms({"right": {"q": q}, "left": {}})
+    assert "right" in T and len(T["right"]) == 6 and len(T["right"][0]) == 16
+    assert "left" not in T                                  # no q -> no transforms
+
+    feed = mod.StateFeed("tcp://127.0.0.1:1")
+    feed.latest = {"status": {"hz": 50.0, "tracked": {"left": False, "right": True},
+                              "engaged": {"left": False, "right": False}, "calib": None},
+                   "arms": {"right": {"q": q}}, "op": {"hands": {}}}
+    feed.rx_time = 1.0
+    srv = mod.make_server(feed, "127.0.0.1", 0, meshes=assets)
+    port = srv.server_address[1]
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("GET", "/meshes")
+        m = json.loads(conn.getresponse().read())
+        assert len(m["left"]) == 6 and len(m["left"][0]) % 9 == 0
+        conn.request("GET", "/state")
+        d = json.loads(conn.getresponse().read())
+        assert len(d["mesh_T"]["right"]) == 6
+    finally:
+        srv.shutdown()
+        srv.server_close()

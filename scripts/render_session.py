@@ -34,7 +34,7 @@ from bimanual_teleop.vr.calibrate import body_relative_hand_sample, head_op_axes
 from bimanual_teleop.vr.frames import quat_to_R, rotvec              # noqa: E402
 from bimanual_teleop.vr.replay import ReplaySource                   # noqa: E402
 
-MJCF_DIR = REPO_ROOT / "src" / "bimanual_teleop" / "sim" / "models" / "yam_real" / "mjcf"
+from bimanual_teleop.viz.yam_meshes import load_arm_meshes, world_tris  # noqa: E402
 
 # WebXR 25-joint finger chains (W3C order), wrist = 0
 FINGER_CHAINS = [([0, 1, 2, 3, 4], "#d4699e"), ([0, 5, 6, 7, 8, 9], "#4a90d9"),
@@ -50,60 +50,6 @@ class NullSink:
 
     def set_hand(self, side, joints):
         pass
-
-
-# --------------------------------------------------------------------------- #
-# Real YAM geometry: synthesize a loadable single-arm MJCF (the repo files split
-# assets and the body-tree fragment), let Pinocchio place the geoms, and parse
-# the binary STLs with numpy. Decimated for matplotlib.
-# --------------------------------------------------------------------------- #
-def _load_stl(path: str) -> np.ndarray:
-    raw = Path(path).read_bytes()
-    n = int.from_bytes(raw[80:84], "little")
-    rec = np.frombuffer(raw[84:84 + n * 50], dtype=np.uint8).reshape(n, 50)
-    return rec[:, 12:48].copy().view("<f4").reshape(n, 3, 3).astype(float)
-
-
-def load_arm_meshes(side: str, max_tris_per_link: int = 800):
-    root = ET.Element("mujoco", {"model": f"yam_{side}"})
-    ET.SubElement(root, "compiler", {"angle": "radian"})
-    asset = ET.SubElement(root, "asset")
-    meshfile = {}
-    src_asset = ET.parse(MJCF_DIR / f"yam_{side}.mjcf").getroot().find("asset")
-    for m in src_asset.findall("mesh"):
-        p = str((MJCF_DIR / m.get("file")).resolve())
-        meshfile[m.get("name")] = (p, float(m.get("scale", "1 1 1").split()[0]))
-        m.set("file", p)
-        asset.append(m)
-    body = ET.parse(MJCF_DIR / f"yam_{side}_body.xml").getroot().find("body")
-    for g in body.iter("geom"):
-        g.set("type", "mesh")                  # pin's parser wants the type explicit
-    ET.SubElement(root, "worldbody").append(body)
-    tmp = f"/tmp/yam_render_{side}.xml"
-    ET.ElementTree(root).write(tmp)
-    model = pin.buildModelFromMJCF(tmp)
-    geom = pin.buildGeomFromMJCF(model, tmp, pin.GeometryType.VISUAL)
-    items = []
-    for g in geom.geometryObjects:
-        path, scale = meshfile[g.name.rsplit("Geom_", 1)[0]]
-        tris = _load_stl(path) * scale
-        if len(tris) > max_tris_per_link:
-            # Keep the LARGEST faces: fine CAD tessellation means every-Nth sampling
-            # leaves triangle dust, while the biggest faces carry the visual mass.
-            area = np.linalg.norm(np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]), axis=1)
-            tris = tris[np.argsort(area)[-max_tris_per_link:]]
-        items.append({"tris": tris, "jid": g.parentJoint,
-                      "place": g.placement.homogeneous})
-    return model, model.createData(), items
-
-
-def world_tris(model, data, items, q, base_T) -> list[np.ndarray]:
-    pin.forwardKinematics(model, data, np.asarray(q, float))
-    out = []
-    for it in items:
-        T = base_T @ data.oMi[it["jid"]].homogeneous @ it["place"]
-        out.append(it["tris"] @ T[:3, :3].T + T[:3, 3])
-    return out
 
 
 def shaded_colors(tris: np.ndarray, base_rgb, light=(0.4, 0.3, 0.85)) -> np.ndarray:

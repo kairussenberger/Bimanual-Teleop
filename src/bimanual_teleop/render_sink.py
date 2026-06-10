@@ -61,6 +61,22 @@ def ordered_hand_state(joints: dict[str, float]) -> dict:
     }
 
 
+def _landmarks_body(hs, op_axes) -> list | None:
+    """25 hand landmarks relative to the wrist joint, rotated into operator BODY
+    axes; flattened 75 floats for the dashboard's hand-skeleton overlay (additive
+    schema field — Unity's JsonUtility ignores it)."""
+    lm = getattr(hs, "landmarks", None)
+    if lm is None:
+        return None
+    try:
+        arr = np.asarray(lm, dtype=float).reshape(25, 3)
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isfinite(arr)):
+        return None
+    return ((arr - arr[0]) @ op_axes).reshape(-1).tolist()
+
+
 def operator_debug_state(frame, torso_from_head) -> dict:
     """Unity/debug overlay state: the body-frame torso→wrist vectors that drive IK."""
     torso = _finite_vec3(torso_from_head, _DEFAULT_TORSO_FROM_HEAD)
@@ -70,7 +86,7 @@ def operator_debug_state(frame, torso_from_head) -> dict:
             "head_pos": None,
             "torso_pos": None,
             "hands": {
-                s: {"tracked": False, "wrist_body": None, "raw_wrist": None}
+                s: {"tracked": False, "wrist_body": None, "raw_wrist": None, "lm_body": None}
                 for s in SIDES
             },
         }
@@ -81,7 +97,7 @@ def operator_debug_state(frame, torso_from_head) -> dict:
             hs = frame.hands.get(s) if frame and frame.hands else None
             wrist = _finite_mat4(hs.wrist) if hs is not None else None
             raw = wrist[:3, 3].tolist() if wrist is not None else None
-            hands[s] = {"tracked": False, "wrist_body": None, "raw_wrist": raw}
+            hands[s] = {"tracked": False, "wrist_body": None, "raw_wrist": raw, "lm_body": None}
         return {"torso_from_head": torso.tolist(), "head_pos": None, "torso_pos": None, "hands": hands}
     op_axes = head_op_axes(head)
     torso_world = head[:3, 3] + op_axes @ torso
@@ -89,18 +105,19 @@ def operator_debug_state(frame, torso_from_head) -> dict:
     for s in SIDES:
         hs = frame.hands.get(s) if frame and frame.hands else None
         if hs is None or not hs.tracked:
-            hands[s] = {"tracked": False, "wrist_body": None, "raw_wrist": None}
+            hands[s] = {"tracked": False, "wrist_body": None, "raw_wrist": None, "lm_body": None}
             continue
         wrist = _finite_mat4(hs.wrist)
         raw = wrist[:3, 3].tolist() if wrist is not None else None
         rel = body_relative_hand_sample(hs, head, torso)
         if rel is None or not rel.tracked or _finite_mat4(rel.wrist) is None:
-            hands[s] = {"tracked": False, "wrist_body": None, "raw_wrist": raw}
+            hands[s] = {"tracked": False, "wrist_body": None, "raw_wrist": raw, "lm_body": None}
             continue
         hands[s] = {
             "tracked": True,
             "wrist_body": rel.wrist[:3, 3].tolist(),
             "raw_wrist": raw,
+            "lm_body": _landmarks_body(hs, op_axes),
         }
     return {
         "torso_from_head": torso.tolist(),

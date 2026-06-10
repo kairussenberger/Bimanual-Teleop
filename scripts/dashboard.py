@@ -31,7 +31,44 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+import numpy as np                                       # noqa: E402
+
 from bimanual_teleop.config import load_rig             # noqa: E402
+
+
+class MeshAssets:
+    """Decimated YAM visual meshes + FK models so the browser draws the REAL robot
+    geometry (same source as scripts/render_session.py's GIFs)."""
+
+    def __init__(self, max_tris_per_link: int = 420):
+        from bimanual_teleop.viz.yam_meshes import geom_transforms, load_arm_meshes
+        from bimanual_teleop.vr.frames import quat_to_R
+        self._geom_transforms = geom_transforms
+        rig = load_rig()
+        self.models = {}
+        self.base_T = {}
+        self.geoms = {}
+        for side in ("left", "right"):
+            model, data, items = load_arm_meshes(side, max_tris_per_link=max_tris_per_link)
+            T = np.eye(4)
+            T[:3, :3] = quat_to_R(rig["arms"][side]["base_quat"])
+            T[:3, 3] = rig["arms"][side]["base_pos"]
+            self.models[side] = (model, data, items)
+            self.base_T[side] = T
+            self.geoms[side] = [it["tris"].reshape(-1).round(5).tolist() for it in items]
+        self._lock = threading.Lock()
+
+    def transforms(self, arms_state: dict) -> dict:
+        """Per-geom world 4×4 (row-major, flattened) for the streamed joint state."""
+        out = {}
+        with self._lock:                       # pin data buffers are not thread-safe
+            for side, (model, data, items) in self.models.items():
+                q = (arms_state.get(side) or {}).get("q")
+                if not q:
+                    continue
+                Ts = self._geom_transforms(model, data, items, q, self.base_T[side])
+                out[side] = [np.asarray(T).reshape(-1).round(6).tolist() for T in Ts]
+        return out
 
 
 class StateFeed:
@@ -87,11 +124,12 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  header b{font-size:15px;margin-right:8px}
  .chip{padding:4px 12px;border-radius:13px;background:#2a2f38;font-weight:600;font-size:13px}
  .ok{background:#1e5d3a}.bad{background:#7c2d2d}.warn{background:#7a6020}
- main{display:grid;grid-template-columns:minmax(560px,1fr) 360px;gap:14px;padding:14px;max-width:1250px}
- .panel{background:var(--panel);border:1px solid #232936;border-radius:12px;padding:12px 14px}
- canvas{display:block;border-radius:8px;background:#0b0e13;cursor:grab}
- .legend{color:var(--dim);font-size:12px;margin-top:8px}
- .legend i{display:inline-block;width:10px;height:10px;border-radius:5px;margin:0 4px -1px 10px}
+ main{display:grid;grid-template-columns:minmax(620px,1fr) 350px;gap:14px;padding:14px;max-width:1400px}
+ .panel{background:var(--panel);border:1px solid #232936;border-radius:12px;padding:10px 12px}
+ .duo{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+ .ptitle{font-size:12.5px;font-weight:700;color:#9fb2c8;letter-spacing:.4px;margin:2px 0 6px}
+ .ptitle span{color:var(--dim);font-weight:400}
+ canvas{display:block;border-radius:8px;background:#0b0e13;cursor:grab;width:100%}
  h3{margin:2px 0 8px;font-size:14px} .armttl{display:flex;justify-content:space-between;align-items:baseline}
  .gauge{display:grid;grid-template-columns:24px 1fr 62px;gap:8px;align-items:center;margin:3px 0;font-variant-numeric:tabular-nums}
  .bar{position:relative;height:12px;background:#222833;border-radius:6px;overflow:hidden}
@@ -109,12 +147,15 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  <span style="flex:1"></span><span class=chip id=age>age —</span>
 </header>
 <main>
- <div class=panel>
-  <canvas id=c3d width=620 height=560></canvas>
-  <div class=legend>drag = orbit, scroll = zoom
-   <i style="background:var(--orange)"></i>right arm <i style="background:var(--blue)"></i>left arm
-   <i style="background:#fff"></i>EE <i style="background:var(--green)"></i>command target
-   <i style="background:var(--gold)"></i>your hands (torso→wrist)</div>
+ <div>
+  <div class=duo>
+   <div class=panel><div class=ptitle>YOUR HANDS <span>— Quest joints, torso-relative</span></div>
+    <canvas id=cvH width=460 height=400></canvas></div>
+   <div class=panel><div class=ptitle>ROBOT <span>— real YAM geometry, live</span></div>
+    <canvas id=cvR width=460 height=400></canvas></div>
+  </div>
+  <div class=panel><div class=ptitle>OVERLAY <span>— your hands mapped into robot world (gold) over the robot. drag = orbit, scroll = zoom</span></div>
+   <canvas id=cvO width=952 height=430></canvas></div>
  </div>
  <div>
   <div class=panel id=cardR style="margin-bottom:14px"></div>
@@ -123,54 +164,115 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
 </main>
 <script>
 const $=id=>document.getElementById(id);
-let yaw=1.05,pitch=0.26,scale=330,drag=null,RIG=null,CTR=[-0.1,-0.05,0.82];
-const cv=$('c3d'),cx=cv.getContext('2d');
-cv.onmousedown=e=>{drag=[e.clientX,e.clientY];cv.style.cursor='grabbing'};
-window.onmouseup=()=>{drag=null;cv.style.cursor='grab'};
-window.onmousemove=e=>{if(!drag)return;yaw-=(e.clientX-drag[0])*0.008;pitch+=(e.clientY-drag[1])*0.006;pitch=Math.max(-1.35,Math.min(1.35,pitch));drag=[e.clientX,e.clientY]};
-cv.onwheel=e=>{e.preventDefault();scale*=e.deltaY<0?1.1:0.9;scale=Math.max(140,Math.min(900,scale))};
 const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], dotp=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
 const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
-const norm=a=>{const n=Math.hypot(...a)||1;return[a[0]/n,a[1]/n,a[2]/n]};
-function cam(){const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
- const fwd=[cp*cy,cp*sy,sp];const right=norm(cross([0,0,1],fwd));const up=cross(fwd,right);return{right,up,fwd}}
-let CAM=null;
-function P(p){const q=sub(p,CTR);return{x:cv.width/2+dotp(q,CAM.right)*scale,y:cv.height/2-dotp(q,CAM.up)*scale,d:dotp(q,CAM.fwd)}}
-let prims=[];
-const shade=(c,d)=>{const f=Math.max(0.55,Math.min(1.15,1-d*0.35));return c.map(v=>Math.round(v*f))};
-const rgb=c=>`rgb(${c[0]},${c[1]},${c[2]})`;
-function seg(a,b,c,w){const A=P(a),B=P(b);prims.push({d:(A.d+B.d)/2,f(){cx.strokeStyle=rgb(shade(c,this.d));cx.lineWidth=w;cx.lineCap='round';cx.beginPath();cx.moveTo(A.x,A.y);cx.lineTo(B.x,B.y);cx.stroke()}})}
-function dotPrim(p,c,r){const A=P(p);prims.push({d:A.d,f(){cx.fillStyle=rgb(shade(c,this.d));cx.beginPath();cx.arc(A.x,A.y,r,0,7);cx.fill()}})}
-function ringPrim(p,c,r){const A=P(p);prims.push({d:A.d-0.001,f(){cx.strokeStyle=rgb(c);cx.lineWidth=2.5;cx.beginPath();cx.arc(A.x,A.y,r,0,7);cx.stroke()}})}
-function flush(){prims.sort((a,b)=>b.d-a.d);for(const p of prims)p.f();prims=[]}
-function grid(){cx.globalAlpha=0.6;for(let i=-4;i<=4;i++){seg([-1.1,i*0.25,0],[0.7,i*0.25,0],[34,40,52],1);seg([i*0.25-0.2,-1.05,0],[i*0.25-0.2,1.05,0],[34,40,52],1)}flush();cx.globalAlpha=1}
-function axesHud(){const o=[46,cv.height-46],L=30;const ax=[[[-1,0,0],'FWD','#9fe89f'],[[0,1,0],'RIGHT','#e89f9f'],[[0,0,1],'UP','#9fb6e8']];
- cx.font='10px sans-serif';for(const[a,t,c]of ax){const u=dotp(a,CAM.right)*L,v=dotp(a,CAM.up)*L;cx.strokeStyle=c;cx.fillStyle=c;cx.lineWidth=2;
- cx.beginPath();cx.moveTo(o[0],o[1]);cx.lineTo(o[0]+u,o[1]-v);cx.stroke();cx.fillText(t,o[0]+u*1.35-9,o[1]-v*1.35+3)}}
-const QCOL={left:[111,159,232],right:[232,133,74]};
-function quat2cols(q){const[w,x,y,z]=q;return[[1-2*(y*y+z*z),2*(x*y+w*z),2*(x*z-w*y)],[2*(x*y-w*z),1-2*(x*x+z*z),2*(y*z+w*x)],[2*(x*z+w*y),2*(y*z-w*x),1-2*(x*x+y*y)]]}
-function draw(s){
- CAM=cam();cx.clearRect(0,0,cv.width,cv.height);grid();
+const nrm=a=>{const n=Math.hypot(a[0],a[1],a[2])||1;return[a[0]/n,a[1]/n,a[2]/n]};
+const LIGHT=nrm([0.4,0.3,0.85]);
+function Scene(canvas,yaw,pitch,scale,ctr){
+ const s={cv:canvas,cx:canvas.getContext('2d'),yaw,pitch,scale,ctr,prims:[],drag:null};
+ canvas.onmousedown=e=>{s.drag=[e.clientX,e.clientY];canvas.style.cursor='grabbing'};
+ window.addEventListener('mouseup',()=>{s.drag=null;canvas.style.cursor='grab'});
+ window.addEventListener('mousemove',e=>{if(!s.drag)return;s.yaw-=(e.clientX-s.drag[0])*0.008;
+  s.pitch=Math.max(-1.35,Math.min(1.35,s.pitch+(e.clientY-s.drag[1])*0.006));s.drag=[e.clientX,e.clientY]});
+ canvas.onwheel=e=>{e.preventDefault();s.scale*=e.deltaY<0?1.1:0.9;s.scale=Math.max(120,Math.min(1200,s.scale))};
+ return s;
+}
+function camOf(s){const cy=Math.cos(s.yaw),sy=Math.sin(s.yaw),cp=Math.cos(s.pitch),sp=Math.sin(s.pitch);
+ const fwd=[cp*cy,cp*sy,sp];const right=nrm(cross([0,0,1],fwd));const up=cross(fwd,right);return{right,up,fwd}}
+function P(s,cam,p){const q=sub(p,s.ctr);
+ return{x:s.cv.width/2+dotp(q,cam.right)*s.scale,y:s.cv.height/2-dotp(q,cam.up)*s.scale,d:dotp(q,cam.fwd)}}
+const rgb=c=>`rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const dim=(c,d)=>{const f=Math.max(0.6,Math.min(1.12,1-d*0.3));return[c[0]*f,c[1]*f,c[2]*f]};
+function seg(s,cam,a,b,c,w){const A=P(s,cam,a),B=P(s,cam,b);
+ s.prims.push({d:(A.d+B.d)/2,f(){const x=s.cx;x.strokeStyle=rgb(dim(c,this.d));x.lineWidth=w;x.lineCap='round';
+  x.beginPath();x.moveTo(A.x,A.y);x.lineTo(B.x,B.y);x.stroke()}})}
+function dot(s,cam,p,c,r){const A=P(s,cam,p);
+ s.prims.push({d:A.d,f(){const x=s.cx;x.fillStyle=rgb(dim(c,this.d));x.beginPath();x.arc(A.x,A.y,r,0,7);x.fill()}})}
+function ring(s,cam,p,c,r){const A=P(s,cam,p);
+ s.prims.push({d:A.d-0.001,f(){const x=s.cx;x.strokeStyle=rgb(c);x.lineWidth=2.4;x.beginPath();x.arc(A.x,A.y,r,0,7);x.stroke()}})}
+function tri(s,cam,p0,p1,p2,base,alpha){
+ const n=nrm(cross(sub(p1,p0),sub(p2,p0)));
+ const lam=Math.abs(dotp(n,LIGHT))*0.65+0.35;
+ const A=P(s,cam,p0),B=P(s,cam,p1),C=P(s,cam,p2);
+ const col=[base[0]*lam,base[1]*lam,base[2]*lam];
+ s.prims.push({d:(A.d+B.d+C.d)/3,f(){const x=s.cx;x.fillStyle=rgb(dim(col,this.d));if(alpha!=null)x.globalAlpha=alpha;
+  x.beginPath();x.moveTo(A.x,A.y);x.lineTo(B.x,B.y);x.lineTo(C.x,C.y);x.closePath();x.fill();if(alpha!=null)x.globalAlpha=1}})}
+function flush(s){s.prims.sort((a,b)=>b.d-a.d);for(const p of s.prims)p.f();s.prims=[]}
+function clearCv(s){s.cx.clearRect(0,0,s.cv.width,s.cv.height)}
+function grid(s,cam,z){for(let i=-4;i<=4;i++){seg(s,cam,[-1.1,i*0.25,z],[0.7,i*0.25,z],[32,38,49],1);
+ seg(s,cam,[i*0.25-0.2,-1.05,z],[i*0.25-0.2,1.05,z],[32,38,49],1)}}
+// ---- data ----
+const FINGERS=[[[0,1,2,3,4],[212,105,158]],[[0,5,6,7,8,9],[74,144,217]],[[0,10,11,12,13,14],[42,161,152]],
+ [[0,15,16,17,18,19],[202,165,32]],[[0,20,21,22,23,24],[166,108,201]]];
+const ARM_RGB={left:[158,189,237],right:[235,143,90]},GOLD=[212,175,55];
+const TRIAD=[[224,72,72],[60,190,80],[80,110,250]];
+function quat2cols(q){const[w,x,y,z]=q;return[[1-2*(y*y+z*z),2*(x*y+w*z),2*(x*z-w*y)],
+ [2*(x*y-w*z),1-2*(x*x+z*z),2*(y*z+w*x)],[2*(x*z+w*y),2*(y*z-w*x),1-2*(x*x+y*y)]]}
+let MESH=null,RIG=null;
+const scH=Scene($('cvH'),-2.18,0.28,430,[0,0.30,0.12]);   // hands: (right, fwd, up)
+const scR=Scene($('cvR'),1.05,0.26,300,[-0.1,-0.05,0.82]);
+const scO=Scene($('cvO'),1.05,0.24,330,[-0.12,-0.05,0.85]);
+function meshInto(s,cam,T,verts,base,alpha){
+ const R=[[T[0],T[1],T[2]],[T[4],T[5],T[6]],[T[8],T[9],T[10]]],t=[T[3],T[7],T[11]];
+ const X=v=>[R[0][0]*v[0]+R[0][1]*v[1]+R[0][2]*v[2]+t[0],
+             R[1][0]*v[0]+R[1][1]*v[1]+R[1][2]*v[2]+t[1],
+             R[2][0]*v[0]+R[2][1]*v[1]+R[2][2]*v[2]+t[2]];
+ for(let i=0;i<verts.length;i+=9)
+  tri(s,cam,X([verts[i],verts[i+1],verts[i+2]]),X([verts[i+3],verts[i+4],verts[i+5]]),
+      X([verts[i+6],verts[i+7],verts[i+8]]),base,alpha);
+}
+function robotInto(s,cam,st,meshT,alpha){
  let bases=[];
- const bl=s.arms.left,br=s.arms.right;
- if(bl&&bl.link_pos&&br&&br.link_pos){const a=bl.link_pos.slice(0,3),b=br.link_pos.slice(0,3);seg(a,b,[44,52,66],10)}
- for(const side of['left','right']){const a=s.arms[side];if(!a||!a.link_pos)continue;
-  const Pn=[];for(let i=0;i<a.link_pos.length;i+=3)Pn.push(a.link_pos.slice(i,i+3));
-  bases.push(Pn[0]);
-  seg([Pn[0][0],Pn[0][1],0],Pn[0],[44,52,66],10);                      // stand column
-  for(let i=1;i<Pn.length;i++)seg(Pn[i-1],Pn[i],QCOL[side],i<4?9:6.5); // the arm
-  for(const p of Pn)dotPrim(p,[24,28,36],2.6);
-  if(a.ee_pos){dotPrim(a.ee_pos,[255,255,255],4.5);
-   if(a.ee_quat){const C=quat2cols(a.ee_quat),L=0.09,tri=[[224,72,72],[60,190,80],[80,110,250]];
-    for(let k=0;k<3;k++)seg(a.ee_pos,[a.ee_pos[0]+C[k][0]*L,a.ee_pos[1]+C[k][1]*L,a.ee_pos[2]+C[k][2]*L],tri[k],2.5)}}
-  if(a.cmd_pos){ringPrim(a.cmd_pos,[65,217,141],8);if(a.ee_pos)seg(a.ee_pos,a.cmd_pos,[65,217,141],1.5)}}
- if(bases.length===2&&s.op&&s.op.hands){
+ for(const side of['left','right']){
+  const a=st.arms[side];if(!a)continue;
+  if(a.link_pos){const b=a.link_pos.slice(0,3);bases.push(b);
+   seg(s,cam,[b[0],b[1],0],b,[40,47,60],9)}
+  if(MESH&&meshT&&meshT[side]){const Ts=meshT[side],gs=MESH[side];
+   for(let g=0;g<gs.length&&g<Ts.length;g++)meshInto(s,cam,Ts[g],gs[g],ARM_RGB[side],alpha);}
+  else if(a.link_pos){const Pn=[];for(let i=0;i<a.link_pos.length;i+=3)Pn.push(a.link_pos.slice(i,i+3));
+   for(let i=1;i<Pn.length;i++)seg(s,cam,Pn[i-1],Pn[i],ARM_RGB[side],i<4?9:6.5)}
+  if(a.ee_pos){dot(s,cam,a.ee_pos,[255,255,255],3.6);
+   if(a.ee_quat){const C=quat2cols(a.ee_quat),L=0.09;
+    for(let k=0;k<3;k++)seg(s,cam,a.ee_pos,[a.ee_pos[0]+C[k][0]*L,a.ee_pos[1]+C[k][1]*L,a.ee_pos[2]+C[k][2]*L],TRIAD[k],2.4)}}
+  if(a.cmd_pos){ring(s,cam,a.cmd_pos,[65,217,141],7);if(a.ee_pos)seg(s,cam,a.ee_pos,a.cmd_pos,[65,217,141],1.4)}}
+ if(bases.length===2)seg(s,cam,bases[0],bases[1],[40,47,60],9);
+ return bases;
+}
+function handWorld(an,w){return[an[0]-w[2],an[1]+w[0],an[2]+w[1]]}      // body [r,u,f] -> world
+function drawHands(st){
+ clearCv(scH);const cam=camOf(scH);
+ grid(scH,cam,-0.45);
+ dot(scH,cam,[0,0,0],GOLD,5);                                            // torso proxy
+ for(const side of['left','right']){
+  const h=st.op&&st.op.hands?st.op.hands[side]:null;
+  if(!h||!h.tracked||!h.wrist_body)continue;
+  const w=h.wrist_body,o=[w[0],w[2],w[1]];                                // (r,f,u)
+  seg(scH,cam,[0,0,0],o,[120,104,40],1.6);
+  if(h.lm_body){const L=[];for(let i=0;i<75;i+=3)L.push([w[0]+h.lm_body[i],w[2]+h.lm_body[i+2],w[1]+h.lm_body[i+1]]);
+   for(const[chain,c]of FINGERS){for(let k=1;k<chain.length;k++)seg(scH,cam,L[chain[k-1]],L[chain[k]],c,2.6);
+    for(const j of chain)dot(scH,cam,L[j],c,2.2)}}
+  else dot(scH,cam,o,GOLD,5);
+ }
+ flush(scH);
+}
+function drawRobot(st,meshT){clearCv(scR);const cam=camOf(scR);grid(scR,cam,0);robotInto(scR,cam,st,meshT,null);flush(scR)}
+function drawOverlay(st,meshT){
+ clearCv(scO);const cam=camOf(scO);grid(scO,cam,0);
+ const bases=robotInto(scO,cam,st,meshT,0.85);
+ if(bases.length===2&&st.op&&st.op.hands){
   const an=[(bases[0][0]+bases[1][0])/2,(bases[0][1]+bases[1][1])/2,(bases[0][2]+bases[1][2])/2-0.15];
-  dotPrim(an,[212,175,55],5);
-  for(const side of['left','right']){const h=s.op.hands[side];if(!h||!h.tracked||!h.wrist_body)continue;
-   const w=h.wrist_body,p=[an[0]-w[2],an[1]+w[0],an[2]+w[1]];
-   seg(an,p,[212,175,55],2.5);dotPrim(p,[212,175,55],5)}}
- flush();axesHud();
+  dot(scO,cam,an,GOLD,5);
+  for(const side of['left','right']){
+   const h=st.op.hands[side];if(!h||!h.tracked||!h.wrist_body)continue;
+   const w=h.wrist_body,o=handWorld(an,w);
+   seg(scO,cam,an,o,[150,128,45],1.6);
+   if(h.lm_body){const L=[];for(let i=0;i<75;i+=3)
+     L.push(handWorld(an,[w[0]+h.lm_body[i],w[1]+h.lm_body[i+1],w[2]+h.lm_body[i+2]]));
+    for(const[chain,c]of FINGERS){for(let k=1;k<chain.length;k++)seg(scO,cam,L[chain[k-1]],L[chain[k]],c,2.4);
+     for(const j of chain)dot(scO,cam,L[j],c,2)}}
+   else dot(scO,cam,o,GOLD,4.5);
+  }}
+ flush(scO);
 }
 function gaugeRow(i,q,lo,hi,margin){
  const span=hi-lo||1,pos=Math.max(0,Math.min(1,(q-lo)/span));
@@ -195,6 +297,7 @@ function chip(id,cls,txt){const e=$(id);e.className='chip '+cls;e.textContent=tx
 async function tick(){
  try{
   if(!RIG){try{RIG=await(await fetch('/rig')).json()}catch(e){}}
+  if(!MESH){try{MESH=await(await fetch('/meshes')).json();if(!MESH.left)MESH=null}catch(e){}}
   const d=await(await fetch('/state')).json();
   chip('conn',d.connected?'ok':'bad',d.connected?'stream connected':'STREAM OFFLINE');
   chip('age',d.age!=null&&d.age<0.3?'ok':'warn','age '+(d.age==null?'—':d.age.toFixed(2)+'s'));
@@ -206,7 +309,7 @@ async function tick(){
     chip(id,tr?(en?'ok':'warn'):'bad',`${id==='L'?'LEFT':'RIGHT'} ${tr?(en?'tracked + engaged':'tracked'):'NO TRACKING'}`)}
    const c=$('calib');
    if(s.status.calib&&s.status.calib.msg){c.style.display='';c.className='chip warn';c.textContent='calib: '+s.status.calib.msg}else c.style.display='none';
-   draw(s);
+   drawHands(s);drawRobot(s,d.mesh_T);drawOverlay(s,d.mesh_T);
    $('cardL').innerHTML=card('left',s);$('cardR').innerHTML=card('right',s);
   }
  }catch(e){chip('conn','bad','dashboard error')}
@@ -233,13 +336,24 @@ def rig_info() -> dict:
                 for side in ("left", "right")}
 
 
-def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None) -> ThreadingHTTPServer:
+def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None,
+                meshes: "MeshAssets | None" = None) -> ThreadingHTTPServer:
     rig_body = json.dumps(rig or {}).encode()
+    mesh_body = json.dumps(meshes.geoms if meshes else {}).encode()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):                                  # noqa: N802 (stdlib API)
             if self.path.startswith("/state"):
-                body = json.dumps(feed.snapshot()).encode()
+                snap = feed.snapshot()
+                if meshes is not None and snap.get("state"):
+                    try:
+                        snap["mesh_T"] = meshes.transforms(snap["state"].get("arms", {}))
+                    except Exception:
+                        snap["mesh_T"] = {}
+                body = json.dumps(snap).encode()
+                ctype = "application/json"
+            elif self.path.startswith("/meshes"):
+                body = mesh_body
                 ctype = "application/json"
             elif self.path.startswith("/rig"):
                 body = rig_body
@@ -270,7 +384,12 @@ def main() -> int:
     endpoint = args.endpoint or load_rig().get("vr", {}).get("unity_json_endpoint", "tcp://127.0.0.1:8102")
     feed = StateFeed(endpoint)
     feed.start()
-    srv = make_server(feed, args.host, args.port, rig=rig_info())
+    try:
+        meshes = MeshAssets()
+    except Exception as e:
+        print(f"[dashboard] mesh view disabled ({e}); falling back to link lines")
+        meshes = None
+    srv = make_server(feed, args.host, args.port, rig=rig_info(), meshes=meshes)
     print(f"[dashboard] http://{args.host}:{args.port}  ←  {endpoint}")
     try:
         srv.serve_forever()
