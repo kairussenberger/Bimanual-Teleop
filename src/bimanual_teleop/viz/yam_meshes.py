@@ -15,6 +15,7 @@ import numpy as np
 import pinocchio as pin
 
 MJCF_DIR = Path(__file__).resolve().parents[1] / "sim" / "models" / "yam_real" / "mjcf"
+STAND_DIR = Path(__file__).resolve().parents[1] / "sim" / "models" / "yam_real" / "assets" / "stand"
 
 
 def load_stl(path: str) -> np.ndarray:
@@ -62,6 +63,18 @@ def load_arm_meshes(side: str, max_tris_per_link: int = 800):
                       "jid": g.parentJoint,
                       "place": g.placement.homogeneous})
     return model, model.createData(), items
+
+
+def load_stand_meshes(z_offset: float, max_tris_per_part: int = 600) -> list[np.ndarray]:
+    """The AgileX stand frame as static world-frame triangle soups. The six
+    frame_part STLs share one assembly frame in millimetres; `z_offset` is the
+    rig's stand.pos z (lifts the feet onto the floor)."""
+    out = []
+    for f in sorted(STAND_DIR.glob("*.stl")):
+        tris = decimate(load_stl(str(f)), max_tris_per_part) * 0.001
+        tris[:, :, 2] += float(z_offset)
+        out.append(tris)
+    return out
 
 
 def geom_transforms(model, data, items, q, base_T) -> list[np.ndarray]:

@@ -42,23 +42,8 @@ import pink
 from pink.tasks import FrameTask, PostureTask
 from pink.limits import ConfigurationLimit, VelocityLimit
 
-from ..vr.frames import SE3, R_to_quat, quat_to_R
+from ..vr.frames import SE3, quat_to_R, swing_twist_angle
 from .yam_pin import build_arm_model, joint_local_axis
-
-
-def swing_twist_angle(R_err: np.ndarray, axis: np.ndarray) -> float:
-    """Signed angle of the TWIST component of R_err about unit `axis`, from the
-    swing–twist decomposition R_err = R_swing · R_twist(axis, angle). Wrapped to
-    [-π, π]; 0 when R_err has no component about the axis."""
-    q = R_to_quat(R_err)
-    if q[0] < 0.0:
-        q = -q                                  # shortest-arc representation
-    proj = float(q[1:] @ axis)
-    n = float(np.hypot(q[0], proj))
-    if n < 1e-12:
-        return 0.0
-    ang = 2.0 * np.arctan2(proj / n, q[0] / n)
-    return float((ang + np.pi) % (2.0 * np.pi) - np.pi)
 
 class ArmIK:
     ELBOW = 2   # index of j3, the elbow joint (soft limit caps its hyperextension)
@@ -124,6 +109,15 @@ class ArmIK:
         self.dt = 1.0 / rig["control"]["arm_hz"]
         self.iters = int(ik.get("iters", 4))
         self.reset()
+        # The EE frame's own tool/roll axis (constant: the EE is rigidly downstream
+        # of j6). The mapper's intrinsic twist mode rotates about exactly this.
+        data0 = self.model.createData()
+        pin.forwardKinematics(self.model, data0, self.q0)
+        pin.updateFramePlacements(self.model, data0)
+        a_base = data0.oMi[self.model.getJointId(self.joints[5])].rotation @ joint_local_axis("j6")
+        ee_R = data0.oMf[self.model.getFrameId(f"{side}_ee")].rotation
+        a_local = ee_R.T @ a_base
+        self.ee_tool_axis_local = a_local / (np.linalg.norm(a_local) + 1e-12)
 
     # ---- model limit plumbing --------------------------------------------- #
     def _apply_pos_limits(self) -> None:

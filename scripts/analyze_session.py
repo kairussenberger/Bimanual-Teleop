@@ -32,8 +32,13 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from bimanual_teleop.config import SIDES, load_rig                  # noqa: E402
 from bimanual_teleop.engine import TeleopEngine                     # noqa: E402
 from bimanual_teleop.vr.calibrate import W_AXES, head_op_axes       # noqa: E402
-from bimanual_teleop.vr.frames import quat_to_R, rotvec             # noqa: E402
+from bimanual_teleop.vr.frames import (                             # noqa: E402
+    quat_from_axis_angle, quat_to_R, rotvec, swing_twist_angle)
 from bimanual_teleop.vr.replay import ReplaySource                  # noqa: E402
+
+
+def _rot(axis, ang):
+    return quat_to_R(quat_from_axis_angle(axis, ang))
 
 
 class NullSink:
@@ -79,6 +84,9 @@ def main() -> int:
 
     engine = TeleopEngine(rig, NullSink())
     arm = engine.arm[side]
+    twist_mode = str(rig.get("mapping", {}).get("twist_mode", "intrinsic"))
+    hand_axis = np.asarray(rig.get("mapping", {}).get("hand_twist_axis", [0.0, 0.456, 0.890]), float)
+    hand_axis = hand_axis / np.linalg.norm(hand_axis)
 
     # Anchor snapshot, re-captured whenever the mapper (re-)engages.
     anchor = None          # dict(raw_R, op_axes, ee_R, ee_p, q)
@@ -122,6 +130,23 @@ def main() -> int:
         cmd_ang = float(np.degrees(np.linalg.norm(rv_ee)))
         cmd_axis_w = base_R @ (rv_ee / (np.linalg.norm(rv_ee) + 1e-12))
 
+        # --- intrinsic-twist contract, verified end-to-end --------------------- #
+        # Independent reconstruction from RAW data + rig constants: decompose the
+        # physical hand rotation about the forearm axis, map the swing through the
+        # body↔world axes, apply the twist about the EE's own tool axis, and
+        # compare against what the engine actually commanded.
+        h_now = W[:3, :3] @ hand_axis                       # forearm axis in the room
+        phi_h = swing_twist_angle(D_xr, h_now)
+        D_sw = D_xr @ _rot(h_now, -phi_h)
+        Q_b = base_R.T @ Q                                  # room → arm base (proper)
+        S_b = Q_b @ D_sw @ Q_b.T
+        A_R = anchor["ee_R"]
+        D_pred = S_b @ (A_R @ _rot(arm.ik.ee_tool_axis_local, phi_h) @ A_R.T)
+        contract_err = float(np.degrees(np.linalg.norm(rotvec(D_pred.T @ D_ee))))
+        ee_ax_b = A_R @ arm.ik.ee_tool_axis_local
+        phi_e = swing_twist_angle(D_ee, ee_ax_b)
+        swing_h = float(np.degrees(np.linalg.norm(rotvec(D_sw))))
+
         # --- translation ------------------------------------------------------- #
         # Body-frame torso→wrist vector, recomputed the same way
         # body_relative_hand_sample does; compared post-hoc via windowed deltas so
@@ -144,6 +169,10 @@ def main() -> int:
             "axis_err": _angle_between(want_axis_w, cmd_axis_w),
             "want_axis": want_axis_w,
             "cmd_axis": cmd_axis_w,
+            "twist_h": float(np.degrees(phi_h)),
+            "twist_e": float(np.degrees(phi_e)),
+            "swing_h": swing_h,
+            "contract_err": contract_err,
             "ctrl_p": ctrl_p,
             "cmd_w": cmd_w,
             "ik_ori_err": ik_ori_err,
@@ -157,10 +186,27 @@ def main() -> int:
 
     sc = [r for r in rows if r["hand_ang"] >= args.min_angle]
     print(f"\nscored {len(sc)}/{len(rows)} engaged frames with hand rotation ≥ {args.min_angle:.0f}°")
-    if sc:
+    if twist_mode == "intrinsic":
+        print("\n---- ORIENTATION mapping (twist_mode=intrinsic) ----")
+        ce = np.array([r["contract_err"] for r in sc]) if sc else np.array([])
+        ok_ori = True
+        if len(ce):
+            print(f"  contract error |predicted − commanded|: median {np.median(ce):5.1f}°   "
+                  f"p90 {np.percentile(ce, 90):5.1f}°")
+            print(f"  (prediction reconstructed from raw data: hand twist about your forearm axis → EE")
+            print(f"   roll about its own tool axis; residual hand swing → world-frame EE swing)")
+            tw = [r for r in sc if abs(r['twist_h']) >= args.min_angle and r['swing_h'] < 10.0]
+            if tw:
+                ratio = np.array([r["twist_e"] / r["twist_h"] for r in tw])
+                print(f"  twist-dominant frames: EE/hand twist ratio median {np.median(ratio):+5.2f} ({len(tw)} frames)")
+            ok_ori = np.median(ce) < 5.0
+        else:
+            print("  (no frames exceeded --min-angle; orientation unscored)")
+        print(f"  VERDICT: {'OK — commanded orientation matches the intrinsic-twist contract' if ok_ori else 'BROKEN — engine output deviates from the intrinsic-twist contract'}")
+    elif sc:
         ax = np.array([r["axis_err"] for r in sc if np.isfinite(r["axis_err"])])
         ratio = np.array([r["cmd_ang"] / max(r["hand_ang"], 1e-9) for r in sc])
-        print("\n---- ORIENTATION mapping (hand rotation → commanded EE rotation) ----")
+        print("\n---- ORIENTATION mapping (twist_mode=world) ----")
         print(f"  world-axis error:    median {np.median(ax):6.1f}°   p90 {np.percentile(ax, 90):6.1f}°")
         print(f"  angle ratio cmd/hand: median {np.median(ratio):5.2f}    (1.00 = same magnitude)")
         mid = sc[len(sc) // 2]

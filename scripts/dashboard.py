@@ -41,7 +41,7 @@ class MeshAssets:
     geometry (same source as scripts/render_session.py's GIFs)."""
 
     def __init__(self, max_tris_per_link: int = 420):
-        from bimanual_teleop.viz.yam_meshes import geom_transforms, load_arm_meshes
+        from bimanual_teleop.viz.yam_meshes import geom_transforms, load_arm_meshes, load_stand_meshes
         from bimanual_teleop.vr.frames import quat_to_R
         self._geom_transforms = geom_transforms
         rig = load_rig()
@@ -56,6 +56,8 @@ class MeshAssets:
             self.models[side] = (model, data, items)
             self.base_T[side] = T
             self.geoms[side] = [it["tris"].reshape(-1).round(5).tolist() for it in items]
+        self.geoms["stand"] = [t.reshape(-1).round(5).tolist()
+                               for t in load_stand_meshes(rig["stand"]["pos"][2], 380)]
         self._lock = threading.Lock()
 
     def transforms(self, arms_state: dict) -> dict:
@@ -221,12 +223,14 @@ function meshInto(s,cam,T,verts,base,alpha){
   tri(s,cam,X([verts[i],verts[i+1],verts[i+2]]),X([verts[i+3],verts[i+4],verts[i+5]]),
       X([verts[i+6],verts[i+7],verts[i+8]]),base,alpha);
 }
+const EYE16=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
 function robotInto(s,cam,st,meshT,alpha){
  let bases=[];
+ if(MESH&&MESH.stand)for(const g of MESH.stand)meshInto(s,cam,EYE16,g,[88,98,112],alpha);
  for(const side of['left','right']){
   const a=st.arms[side];if(!a)continue;
   if(a.link_pos){const b=a.link_pos.slice(0,3);bases.push(b);
-   seg(s,cam,[b[0],b[1],0],b,[40,47,60],9)}
+   if(!MESH||!MESH.stand)seg(s,cam,[b[0],b[1],0],b,[40,47,60],9)}
   if(MESH&&meshT&&meshT[side]){const Ts=meshT[side],gs=MESH[side];
    for(let g=0;g<gs.length&&g<Ts.length;g++)meshInto(s,cam,Ts[g],gs[g],ARM_RGB[side],alpha);}
   else if(a.link_pos){const Pn=[];for(let i=0;i<a.link_pos.length;i+=3)Pn.push(a.link_pos.slice(i,i+3));
@@ -235,7 +239,7 @@ function robotInto(s,cam,st,meshT,alpha){
    if(a.ee_quat){const C=quat2cols(a.ee_quat),L=0.09;
     for(let k=0;k<3;k++)seg(s,cam,a.ee_pos,[a.ee_pos[0]+C[k][0]*L,a.ee_pos[1]+C[k][1]*L,a.ee_pos[2]+C[k][2]*L],TRIAD[k],2.4)}}
   if(a.cmd_pos){ring(s,cam,a.cmd_pos,[65,217,141],7);if(a.ee_pos)seg(s,cam,a.ee_pos,a.cmd_pos,[65,217,141],1.4)}}
- if(bases.length===2)seg(s,cam,bases[0],bases[1],[40,47,60],9);
+ if(bases.length===2&&(!MESH||!MESH.stand))seg(s,cam,bases[0],bases[1],[40,47,60],9);
  return bases;
 }
 function handWorld(an,w){return[an[0]-w[2],an[1]+w[0],an[2]+w[1]]}      // body [r,u,f] -> world

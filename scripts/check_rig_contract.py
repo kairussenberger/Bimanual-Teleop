@@ -70,6 +70,11 @@ def main() -> int:
             "put the robot's hands in front of the robot ('relative' is per-run diagnostics only)")
     blend = float(mapping.get("engage_blend_s", float("nan")))
     require(np.isfinite(blend) and blend >= 0.0, "mapping.engage_blend_s must be finite and >= 0")
+    require(mapping.get("twist_mode") == "intrinsic",
+            "mapping.twist_mode must default to 'intrinsic' — a wrist turn is a pure j6 roll, "
+            "never a j4/j5 swing through the wrist singularity ('world' is diagnostics only)")
+    hta = check_vector("mapping.hand_twist_axis", mapping.get("hand_twist_axis"), 3)
+    require(abs(np.linalg.norm(hta) - 1.0) < 0.05, "mapping.hand_twist_axis must be (near) unit length")
     anchor = mapping.get("body_anchor_world")
     if anchor is not None:
         check_vector("mapping.body_anchor_world", anchor, 3)

@@ -257,3 +257,115 @@ def test_clutch_position_change_of_basis():
     m.engage(_se3(np.eye(3), [0, 0, 0]), _se3(np.eye(3), [0.1, 0.2, 0.3]))
     tgt = m.target(_se3(np.eye(3), [0.05, 0, 0]))   # +5cm webxr x (right)
     assert np.allclose(tgt.translation(), [0.1, 0.25, 0.3], atol=1e-9)  # -> +Y base
+
+
+def test_intrinsic_twist_pure_pronation_is_pure_ee_tool_roll():
+    """THE wrist-singularity killer: a wrist turn about YOUR forearm axis commands
+    a PURE rotation about the EE's OWN tool/j6 axis — same magnitude, zero swing —
+    from ANY anchor orientation and ANY hand attitude, both sides."""
+    from bimanual_teleop.arms.ik import ArmIK
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.vr.calibrate import R_base_from_body, body_relative_hand_sample
+
+    rig = load_rig()
+    h_local = np.array(rig["mapping"]["hand_twist_axis"], dtype=float)
+    h_local /= np.linalg.norm(h_local)
+    head = np.eye(4)
+    head[:3, 3] = [0.0, 1.6, 0.0]
+    rng = np.random.default_rng(3)
+    for side in ("left", "right"):
+        ik = ArmIK(rig, side)
+        m = F.ClutchMapper(R_base_from_body(rig["arms"][side]["base_quat"]),
+                           twist_mode="intrinsic", hand_twist_axis=h_local,
+                           ee_tool_axis=ik.ee_tool_axis_local)
+        for _ in range(4):
+            W0 = np.eye(4)
+            W0[:3, :3] = F.euler_to_R(rng.uniform(-1.5, 1.5, 3))
+            W0[:3, 3] = [0.2, 1.3, -0.4]
+            A = F.euler_to_R(rng.uniform(-2, 2, 3))
+            th = rng.uniform(-1.2, 1.2)
+            a_phys = W0[:3, :3] @ h_local                      # forearm axis in the room
+            W1 = W0.copy()
+            W1[:3, :3] = _axis_angle_R(a_phys, th) @ W0[:3, :3]
+            s0 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W0), head)
+            s1 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W1), head)
+            m.engage(F.mat_to_se3(s0.wrist), _se3(A, [0.3, 0.1, 0.5]), t=0.0)
+            D = m.target(F.mat_to_se3(s1.wrist), 0.0).rotation().as_matrix() @ A.T
+            rv = F.rotvec(D)
+            ang = np.linalg.norm(rv)
+            # rig base quats carry ~5 decimals → ~1e-5 rad numerical floor
+            assert abs(ang - abs(th)) < 1e-4                   # full magnitude preserved
+            axis = rv / ang
+            tool_b = A @ ik.ee_tool_axis_local                 # EE tool axis in base
+            assert abs(abs(axis @ tool_b) - 1.0) < 1e-6, (side, axis, tool_b)  # PURE tool roll
+
+
+def test_intrinsic_twist_equals_world_mapping_when_axes_align():
+    """Sign pin: when the EE tool axis happens to point along the world-mapped
+    twist axis, intrinsic and world modes must produce the SAME target."""
+    from bimanual_teleop.arms.ik import ArmIK
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.vr.calibrate import R_base_from_body, body_relative_hand_sample
+
+    def rot_a_to_b(a, b):
+        a, b = a / np.linalg.norm(a), b / np.linalg.norm(b)
+        v = np.cross(a, b)
+        c = float(a @ b)
+        if np.linalg.norm(v) < 1e-9:
+            return np.eye(3)
+        return _axis_angle_R(v, np.arctan2(np.linalg.norm(v), c))
+
+    rig = load_rig()
+    h_local = np.array(rig["mapping"]["hand_twist_axis"], dtype=float)
+    h_local /= np.linalg.norm(h_local)
+    head = np.eye(4)
+    head[:3, 3] = [0.0, 1.6, 0.0]
+    for side in ("left", "right"):
+        ik = ArmIK(rig, side)
+        Rmap = R_base_from_body(rig["arms"][side]["base_quat"])
+        W0 = np.eye(4)
+        W0[:3, :3] = F.euler_to_R([0.5, -0.2, 0.3])
+        W0[:3, 3] = [0.2, 1.3, -0.4]
+        W1 = W0.copy()
+        W1[:3, :3] = _axis_angle_R(W0[:3, :3] @ h_local, 0.7) @ W0[:3, :3]
+        s0 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W0), head)
+        s1 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W1), head)
+        ctrl0, ctrl1 = F.mat_to_se3(s0.wrist), F.mat_to_se3(s1.wrist)
+        dR = ctrl1.rotation().as_matrix() @ ctrl0.rotation().as_matrix().T
+        rv = F.rotvec(Rmap @ dR @ Rmap.T)
+        A = rot_a_to_b(ik.ee_tool_axis_local, rv / np.linalg.norm(rv))
+        ee = _se3(A, [0.3, 0.1, 0.5])
+        mw = F.ClutchMapper(Rmap, twist_mode="world")
+        mi = F.ClutchMapper(Rmap, twist_mode="intrinsic", hand_twist_axis=h_local,
+                            ee_tool_axis=ik.ee_tool_axis_local)
+        mw.engage(ctrl0, ee, t=0.0)
+        mi.engage(ctrl0, ee, t=0.0)
+        Rw = mw.target(ctrl1, 0.0).rotation().as_matrix()
+        Ri = mi.target(ctrl1, 0.0).rotation().as_matrix()
+        assert np.degrees(np.linalg.norm(F.rotvec(Rw.T @ Ri))) < 1e-6, side
+
+
+def test_intrinsic_twist_continuity_and_body_turn_invariance():
+    from bimanual_teleop.arms.ik import ArmIK
+    from bimanual_teleop.config import load_rig
+    from bimanual_teleop.vr.calibrate import R_base_from_body, body_relative_hand_sample
+
+    rig = load_rig()
+    ik = ArmIK(rig, "right")
+    m = F.ClutchMapper(R_base_from_body(rig["arms"]["right"]["base_quat"]),
+                       twist_mode="intrinsic",
+                       hand_twist_axis=rig["mapping"]["hand_twist_axis"],
+                       ee_tool_axis=ik.ee_tool_axis_local)
+    head0 = np.eye(4)
+    head0[:3, 3] = [0.0, 1.6, 0.0]
+    W0 = np.eye(4)
+    W0[:3, :3] = F.euler_to_R([0.4, 0.2, -0.7])
+    W0[:3, 3] = [0.25, 1.3, -0.45]
+    s0 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=W0), head0)
+    A = F.euler_to_R([0.3, -0.4, 0.8])
+    m.engage(F.mat_to_se3(s0.wrist), _se3(A, [0.3, 0.1, 0.5]), t=0.0)
+    assert np.allclose(m.target(F.mat_to_se3(s0.wrist), 0.0).rotation().as_matrix(), A, atol=1e-9)
+    Q = np.eye(4)
+    Q[:3, :3] = _axis_angle_R([0, 1, 0], 0.8)
+    s1 = body_relative_hand_sample(F.HandSample(tracked=True, wrist=Q @ W0), Q @ head0)
+    assert np.allclose(m.target(F.mat_to_se3(s1.wrist), 1.0).rotation().as_matrix(), A, atol=1e-9)

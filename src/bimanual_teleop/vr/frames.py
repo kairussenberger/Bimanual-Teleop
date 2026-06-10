@@ -96,6 +96,21 @@ def R_to_quat(R: np.ndarray) -> np.ndarray:
     return q / np.linalg.norm(q)
 
 
+def swing_twist_angle(R_err: np.ndarray, axis: np.ndarray) -> float:
+    """Signed angle of the TWIST component of R_err about unit `axis`, from the
+    swing–twist decomposition R_err = R_swing · R_twist(axis, angle). Wrapped to
+    [-π, π]; 0 when R_err has no component about the axis."""
+    q = R_to_quat(R_err)
+    if q[0] < 0.0:
+        q = -q                                  # shortest-arc representation
+    proj = float(q[1:] @ axis)
+    n = float(np.hypot(q[0], proj))
+    if n < 1e-12:
+        return 0.0
+    ang = 2.0 * np.arctan2(proj / n, q[0] / n)
+    return float((ang + np.pi) % (2.0 * np.pi) - np.pi)
+
+
 def conjugate_rotation(R_basis: np.ndarray, R_delta: np.ndarray) -> np.ndarray:
     """Change-of-basis for a ROTATION (spec Section 3): re-express R_delta — a
     rotation given in frame A — in the frame that R_basis (A→B) maps into:
@@ -255,16 +270,30 @@ class ClutchMapper:
 
     def __init__(self, R_base_from_vr: np.ndarray, pos_scale: float = 1.0, *,
                  position_mode: str = "relative", chest_base=None,
-                 engage_blend_s: float = 1.0):
+                 engage_blend_s: float = 1.0, twist_mode: str = "world",
+                 hand_twist_axis=None, ee_tool_axis=None):
         if position_mode not in ("relative", "absolute"):
             raise ValueError(f"position_mode must be 'relative' or 'absolute', got {position_mode!r}")
         if position_mode == "absolute" and chest_base is None:
             raise ValueError("absolute position_mode needs chest_base (robot chest in arm base frame)")
+        if twist_mode not in ("world", "intrinsic"):
+            raise ValueError(f"twist_mode must be 'world' or 'intrinsic', got {twist_mode!r}")
+        if twist_mode == "intrinsic" and (hand_twist_axis is None or ee_tool_axis is None):
+            raise ValueError("intrinsic twist_mode needs hand_twist_axis (hand-local) and "
+                             "ee_tool_axis (EE-local j6 axis)")
         self.R = np.asarray(R_base_from_vr, dtype=float).reshape(3, 3)
         self.scale = float(pos_scale)
         self.mode = position_mode
         self.chest = None if chest_base is None else np.asarray(chest_base, dtype=float).reshape(3)
         self.blend_s = float(engage_blend_s)
+        self.twist_mode = twist_mode
+        self.hand_axis = None
+        self.ee_axis = None
+        if twist_mode == "intrinsic":
+            h = np.asarray(hand_twist_axis, dtype=float).reshape(3)
+            e = np.asarray(ee_tool_axis, dtype=float).reshape(3)
+            self.hand_axis = h / (np.linalg.norm(h) + 1e-12)
+            self.ee_axis = e / (np.linalg.norm(e) + 1e-12)
         self.anchor_ctrl: SE3 | None = None
         self.anchor_ee: SE3 | None = None
         self._blend_t0: float | None = None
@@ -339,5 +368,28 @@ class ClutchMapper:
             dp_vr = ctrl.translation() - self.anchor_ctrl.translation()
             p = self.anchor_ee.translation() + self.scale * (self.R @ dp_vr)
         dR = ctrl.rotation().as_matrix() @ self.anchor_ctrl.rotation().as_matrix().T
-        Rt = (self.R @ dR @ self.R.T) @ self.anchor_ee.rotation().as_matrix()
+        A = self.anchor_ee.rotation().as_matrix()
+        if self.twist_mode == "intrinsic":
+            # Decompose the hand delta into TWIST about the hand's own forearm axis
+            # and the residual SWING. The twist drives the EE about ITS OWN tool/j6
+            # axis (intrinsic — a wrist turn is always a pure j6 roll, never a j4/j5
+            # contortion through the wrist singularity); only real pitch/yaw of the
+            # hand swings the EE, mapped through the world frame like translation.
+            h = ctrl.rotation().as_matrix() @ self.hand_axis      # hand axis NOW (ctrl frame)
+            phi = swing_twist_angle(dR, h)
+            dR_swing = dR @ quat_to_R(quat_from_axis_angle(h, -phi))
+            Rt = (self.R @ dR_swing @ self.R.T) @ A @ quat_to_R(
+                quat_from_axis_angle(self.ee_axis, self._twist_sign() * phi))
+        else:
+            Rt = (self.R @ dR @ self.R.T) @ A
         return SE3.from_rotation_and_translation(SO3.from_matrix(Rt), p)
+
+    def _twist_sign(self) -> float:
+        """Sense pairing between the hand-axis twist angle and the EE tool-axis
+        rotation. In body-relative mode the ctrl basis carries a reflection
+        (det −1), which mirrors the measured twist angle relative to the physical
+        pronation; the world-frame swing path cancels it via conjugation, but the
+        intrinsic path must compensate explicitly so that, when the hand axis and
+        the EE tool axis happen to align in space, intrinsic and world mapping
+        agree (pinned by tests/test_frames.py)."""
+        return -1.0 if np.linalg.det(self.R) < 0 else 1.0

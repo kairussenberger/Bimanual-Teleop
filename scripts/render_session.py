@@ -34,7 +34,7 @@ from bimanual_teleop.vr.calibrate import body_relative_hand_sample, head_op_axes
 from bimanual_teleop.vr.frames import quat_to_R, rotvec              # noqa: E402
 from bimanual_teleop.vr.replay import ReplaySource                   # noqa: E402
 
-from bimanual_teleop.viz.yam_meshes import load_arm_meshes, world_tris  # noqa: E402
+from bimanual_teleop.viz.yam_meshes import load_arm_meshes, load_stand_meshes, world_tris  # noqa: E402
 
 # WebXR 25-joint finger chains (W3C order), wrist = 0
 FINGER_CHAINS = [([0, 1, 2, 3, 4], "#d4699e"), ([0, 5, 6, 7, 8, 9], "#4a90d9"),
@@ -109,6 +109,7 @@ def make_renderer(rig: dict, frames: list, fig, debug_links: bool = False):
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
     arms = {s: load_arm_meshes(s) for s in SIDES}
+    stand = load_stand_meshes(rig["stand"]["pos"][2], 600)
     base_T = {}
     for s in SIDES:
         T = np.eye(4)
@@ -142,6 +143,9 @@ def make_renderer(rig: dict, frames: list, fig, debug_links: bool = False):
         axh.set_title(f"YOUR HANDS — Quest joints, torso-relative\n"
                       f"rotation since engage   L {la:3.0f}°   R {ra:3.0f}°", fontsize=11)
         # ---- robot: real YAM meshes via engine joint state ----------------------
+        for tw in stand:
+            axr.add_collection3d(Poly3DCollection(
+                tw, facecolors=shaded_colors(tw, (0.40, 0.44, 0.50)), edgecolors="none"))
         for s in SIDES:
             model, data, items = arms[s]
             for tw in world_tris(model, data, items, f["q"][s], base_T[s]):
@@ -156,7 +160,7 @@ def make_renderer(rig: dict, frames: list, fig, debug_links: bool = False):
                 jp = np.stack([(base_T[s] @ data.oMi[j].homogeneous)[:3, 3]
                                for j in range(1, model.njoints)])
                 axr.plot(jp[:, 0], jp[:, 1], jp[:, 2], "o-", c="k", ms=3, lw=1.2, alpha=0.8)
-        axr.set_xlim(-0.62, 0.28), axr.set_ylim(-0.5, 0.4), axr.set_zlim(0.5, 1.4)
+        axr.set_xlim(-0.62, 0.34), axr.set_ylim(-0.52, 0.44), axr.set_zlim(0.0, 1.45)
         axr.set_box_aspect((1, 1, 1)), axr.view_init(elev=14, azim=-38)
         axr.set_xticks([]), axr.set_yticks([]), axr.set_zticks([])
         lc, rc = f["ang"]["left"][1], f["ang"]["right"][1]

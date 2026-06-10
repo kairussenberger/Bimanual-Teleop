@@ -55,12 +55,24 @@ from the first tick). The `ik.soft_margin` values are sized so this front-of-bod
 workspace is reachable — re-tightening them below the measured excursions in
 config/rig.yaml's comment will pin the arm short of its targets again.
 
-EE ORIENTATION is CALIBRATION-FREE and uses the same body→world axis map
-(`ClutchMapper.target`): the wrist rotation since clutch-engage, measured in body
-axes, is applied to the anchored EE orientation about the corresponding
-robot-world axes — rotate your hand θ about body-forward and the EE rotates θ
-about world −X, from any starting pose. `vr.calib_seconds` defaults to 0; the
+EE ORIENTATION is CALIBRATION-FREE and split swing/twist
+(`mapping.twist_mode: intrinsic`, `ClutchMapper.target`): the wrist rotation
+since clutch-engage is decomposed about the operator's forearm axis
+(`mapping.hand_twist_axis`, measured from a real session). The TWIST becomes an
+EE roll about the EE's OWN tool/j6 axis — a wrist turn is always a pure j6 roll,
+never a j4/j5 swing through the wrist singularity (verified at 1.9° median
+contract error on a real recording). The residual SWING (real pitch/yaw of the
+hand) maps through the same body→world axes as translation. `twist_mode: world`
+(fully extrinsic) is diagnostics-only. `vr.calib_seconds` defaults to 0; the
 legacy stance hold only steers arms when `vr.body_relative` is false.
+
+Known physics: orientation is relative-latched, so a large attitude offset
+between hand and EE accumulated at engage (e.g. engaging at rest then raising
+the hand without re-orienting) can command wrist attitudes near the YAM's
+reach/limit envelope; re-engaging the clutch re-anchors and clears the offset.
+If live feel demands it, the designed next step is absolute orientation with a
+fixed hand↔EE convention (derivable from the measured hand axes — still no
+stance calibration).
 
 Do not reintroduce a stance-calibrated hand-local↔EE-local correspondence: an
 imperfect calibration pose scrambles every commanded rotation axis (measured 145°

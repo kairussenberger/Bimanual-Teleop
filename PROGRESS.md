@@ -3,6 +3,43 @@
 The repository has been reworked away from the old local MuJoCo simulator toward a
 headless body-relative teleop runtime with a Unity render stream.
 
+## 2026-06-10 (intrinsic twist + full-robot render)
+
+Operator feedback: position perfect, but "the wrist still gets into singularities
+when I'm turning it — should really just be turning J6"; also asked to render the
+entire robot.
+
+Root cause of the remaining singularity feel: orientation mapped fully
+EXTRINSICALLY (world axes). A wrist turn about the operator's forearm axis only
+lands on j6 when the EE tool axis happens to be parallel to that world axis;
+otherwise it decomposes at the robot into twist + SWING, and the swing drags
+j4/j5 through the wrist singularity.
+
+Change (`mapping.twist_mode: intrinsic`, default): the hand rotation since engage
+is decomposed about the operator's forearm axis (`mapping.hand_twist_axis` =
+[0, 0.456, 0.890] in the ORBIT hand frame, measured from the real roll session at
+77% single-axis energy). The twist is applied about the EE's OWN tool/j6 axis
+(the body-relative reflection compensated via det(R), pinned by an
+aligned-equivalence test where intrinsic must equal world mapping exactly); the
+residual swing maps through world axes as before. ArmIK exposes
+`ee_tool_axis_local` (constant). The analyzer now verifies the full contract by
+independently reconstructing the predicted EE rotation from raw data: 1.9° median
+/ 3.5° p90 on the real recording.
+
+Honest physics surfaced by the recording: with always-on engagement from a
+desk-rest anchor, raising the hand without re-orienting it keeps commanding the
+rest attitude (tool axis down) at chest height — near the wrist's reach/limit
+envelope, so achieved-vs-commanded orientation strains (IK tracking median ~68°
+on this worst-case session). Live gesture-clutch re-engages re-anchor the
+attitude and clear the offset; if live feel demands more, the designed next step
+is absolute orientation with a fixed hand↔EE convention (no stance calibration
+needed). Documented in CLAUDE.md.
+
+Full-robot render: the AgileX stand frame STLs self-assemble (one assembly frame,
+mm) — `viz/yam_meshes.load_stand_meshes` places them at `stand.pos`; drawn in the
+dashboard (static /meshes entry) and the render_session GIFs. ORCA hands ship no
+meshes anywhere, so robot hands remain EE triads.
+
 ## 2026-06-10 (hardening pass) — Hardware Safety, Dashboard, Keyboard Jog, Architecture
 
 Operator sign-off on the mapping ("working now, perfect") triggered the

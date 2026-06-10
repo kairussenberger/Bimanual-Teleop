@@ -49,9 +49,20 @@ class ArmController:
                               + np.asarray(rig["arms"]["right"]["base_pos"], dtype=float)) \
                 - np.array([0.0, 0.0, drop])
         chest_base = self.base_R.T @ (np.asarray(anchor_w, dtype=float) - self.base_pos)
+        # Intrinsic wrist twist: pronation about YOUR forearm axis becomes a pure
+        # j6 roll about the EE's own tool axis (never a j4/j5 swing through the
+        # wrist singularity). Forced to 'world' in legacy raw-room mode.
+        twist_mode = str(m.get("twist_mode", "intrinsic"))
+        if not body_relative:
+            twist_mode = "world"
         self.mapper = ClutchMapper(R, pos_scale=m["pos_scale"], position_mode=mode,
                                    chest_base=chest_base if mode == "absolute" else None,
-                                   engage_blend_s=float(m.get("engage_blend_s", 1.0)))
+                                   engage_blend_s=float(m.get("engage_blend_s", 1.0)),
+                                   twist_mode=twist_mode,
+                                   hand_twist_axis=m.get("hand_twist_axis", [0.0, 0.456, 0.890])
+                                   if twist_mode == "intrinsic" else None,
+                                   ee_tool_axis=self.ik.ee_tool_axis_local
+                                   if twist_mode == "intrinsic" else None)
         # Anti-cross guard: keep this hand on its own side of the world Y axis so
         # the two arms can never overlap. left stays y ≤ -gap, right stays y ≥ +gap.
         gap = float(rig.get("vr", {}).get("cross_gap", 0.05))

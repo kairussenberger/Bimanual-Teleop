@@ -78,6 +78,11 @@ mapping:
   body_anchor_world: null   # robot chest point (world); null = midpoint of the arm bases, dropped by body_anchor_drop
   body_anchor_drop: 0.15    # m below the base plates (shoulder line) for the default chest anchor
   engage_blend_s: 1.0       # seconds to glide from the current EE onto the absolute target
+  # Wrist twist: 'intrinsic' = pronation about YOUR forearm axis is a pure j6 roll
+  # about the EE's own tool axis (no j4/j5 singularity contortion); pitch/yaw of the
+  # hand still maps through world axes. 'world' = fully extrinsic (diagnostics).
+  twist_mode: intrinsic
+  hand_twist_axis: [0.0, 0.456, 0.890]  # forearm axis in the ORBIT hand frame (measured from a real roll session, 77% single-axis)
   pos_scale: 1.0
   # Legacy manual mapper trim (euler xyz, rad). In body_relative mode the runtime
   # installs the measured body->base mapping at calibration time; leave these at zero

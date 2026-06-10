@@ -94,8 +94,9 @@ def test_dashboard_serves_meshes_and_mesh_transforms():
     world transforms computed from the streamed joint state."""
     mod = _load("dashboard")
     assets = mod.MeshAssets(max_tris_per_link=60)
-    assert set(assets.geoms) == {"left", "right"}
+    assert set(assets.geoms) == {"left", "right", "stand"}
     assert len(assets.geoms["right"]) == 6                  # base + link1..5
+    assert len(assets.geoms["stand"]) == 6                  # AgileX frame parts
     rig = load_rig()
     q = list(rig["arms"]["right"]["neutral_q"])
     T = assets.transforms({"right": {"q": q}, "left": {}})
