@@ -9,9 +9,9 @@ dependencies = [
     "msgpack>=1.0",         # compact message encoding on the bus
     "loop-rate-limiters>=0.1",  # fixed-rate control loops
     "pyyaml>=6",
-    "orca-core",            # real ORCA hand driver + 17-joint config (degrees); editable sibling
     "pin>=4.0",
     "pin-pink>=4.2",
+    "typing-extensions>=4.5",  # used by pink at import time but not declared by it
     "daqp>=0.8.7",
 ]
 
@@ -24,9 +24,12 @@ vr = ["vuer>=0.0.32"]
 # fast-simplification: quadric mesh decimation for the dense ORCA hand STLs in
 # the dashboard/GIF renderers (graceful fallback to crude decimation if absent).
 telemetry = ["rerun-sdk>=0.20", "fast-simplification>=0.1.7"]
-# Real YAM arms are Linux-only (SocketCAN). Install the i2rt SDK manually on the Linux host:
-#   git clone https://github.com/i2rt-robotics/i2rt && uv pip install -e i2rt   (Ubuntu, Python 3.11)
-# hardware = ["i2rt"]   # not on PyPI; see README "Hardware day".
+# HARDWARE drivers are installed manually on the Linux control host only — the
+# sim/render/replay stack is fully self-contained (hand configs + meshes are
+# vendored under sim/models/orcahand_v2):
+#   uv pip install git+https://github.com/orcahand/orca_core      # ORCA hands
+#   git clone https://github.com/i2rt-robotics/i2rt && uv pip install -e i2rt  # YAM arms
+# hardware = ["i2rt", "orca-core"]   # not on PyPI; see README "Hardware day".
 
 # Dev/test tooling. uv installs dependency-groups into the `uv run` env by default,
 # so the DoD command `uv run pytest` works without extra flags.
@@ -35,9 +38,6 @@ dev = ["pytest>=8"]
 
 [tool.uv]
 package = true
-
-[tool.uv.sources]
-orca-core = { path = "../orca_core", editable = true }
 
 [build-system]
 requires = ["hatchling"]

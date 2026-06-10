@@ -86,16 +86,18 @@ Quest ORBIT app ──adb/ZMQ──► VRFrame (head, wrists, 25 landmarks, pinc
 
 ## 2. Install
 
-Prereqs: **Python 3.12**, [`uv`](https://docs.astral.sh/uv/), macOS or Linux.
-Two sibling repos sit next to this one (same parent directory):
+Prereqs: **Python 3.12** and [`uv`](https://docs.astral.sh/uv/) — that's it.
+The repo is fully self-contained for everything except real hardware: the ORCA
+hand model (render-grade meshes + joint configs, MIT, from
+[orcahand/orcahand_description](https://github.com/orcahand/orcahand_description))
+is vendored under `sim/models/orcahand_v2/`. Optional full-resolution sources
+and the hardware drivers are picked up automatically if present:
 
 ```text
 Developer/
-├── Bimanual-Humanoid-Manipulator/   ← this repo
-├── orca_core/                       ← ORCA hand driver (editable dependency, REQUIRED)
-└── orcahand_description/            ← OPTIONAL full-res ORCA meshes (a render-grade
-                                       simplified copy of the real model is VENDORED in
-                                       this repo, so everything works without it)
+├── Bimanual-Humanoid-Manipulator/   ← this repo (works standalone)
+├── orcahand_description/            ← optional: full-res ORCA meshes (renderers prefer it)
+└── orca_core/                       ← optional: ORCA driver (hardware + machine calibration)
 ```
 
 ```sh
@@ -340,6 +342,7 @@ in short:
 
 ```sh
 sudo ip link set can0 up type can bitrate 1000000      # and can1
+uv pip install git+https://github.com/orcahand/orca_core   # ORCA hand driver
 uv pip install -e ../i2rt                              # i2rt SDK on the host
 uv run python scripts/verify_stack.py                  # gate ON the host
 uv run python scripts/dashboard.py                     # watch everything

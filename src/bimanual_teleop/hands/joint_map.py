@@ -47,10 +47,27 @@ def sim_short_to_orca(short: str) -> str:
 
 
 def load_hand_config(model_name: str):
-    """neutral_position + joint_roms (both dicts in degrees) for an ORCA hand."""
-    from orca_core.hand_config import OrcaHandConfig
-    cfg = OrcaHandConfig.from_config_path(model_name=model_name)
-    return dict(cfg.neutral_position), dict(cfg.joint_roms_dict)
+    """neutral_position + joint_roms (both dicts in degrees) for an ORCA hand.
+
+    Prefers the orca_core driver package when installed (it carries any
+    machine-local calibration); otherwise uses the configs vendored alongside
+    the hand model (scripts/vendor_orcahand.py), so the sim/render/replay path
+    needs no driver install at all."""
+    try:
+        from orca_core.hand_config import OrcaHandConfig
+        cfg = OrcaHandConfig.from_config_path(model_name=model_name)
+        return dict(cfg.neutral_position), dict(cfg.joint_roms_dict)
+    except ImportError:
+        pass
+    import pathlib
+
+    import yaml
+    side = "left" if "left" in model_name else "right"
+    path = (pathlib.Path(__file__).resolve().parents[1] / "sim" / "models"
+            / "orcahand_v2" / f"hand_config_{side}.yaml")
+    data = yaml.safe_load(path.read_text())
+    return (dict(data["neutral_position"]),
+            {k: tuple(v) for k, v in data["joint_roms"].items()})
 
 
 def deg(value: float) -> float:

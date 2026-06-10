@@ -3,7 +3,8 @@
 Same set_hand seam as the sim. Lifecycle (from orca-teleop): connect → init_joints
 → [loop: set_joint_positions(dict_degrees)] → disable_torque + disconnect. Works on
 macOS and Linux (USB-serial Feetech). Import-guarded so the package imports without
-orca_core present, though orca_core is a normal dependency here.
+orca_core present. orca_core is NOT a base dependency — install it on the
+hardware host: `uv pip install git+https://github.com/orcahand/orca_core`.
 """
 from __future__ import annotations
 

@@ -63,6 +63,22 @@ def main() -> int:
             total_in += len(tris)
             total_out += len(simp)
         tree.write(OUT / "mjcf" / f"orcahand_{side}.mjcf")
+    # Hand configs (neutral pose + joint ROMs, degrees) so the sim/render path
+    # runs without the orca_core driver package installed.
+    import yaml
+    from orca_core.hand_config import OrcaHandConfig
+    for side in ("left", "right"):
+        cfg = OrcaHandConfig.from_config_path(model_name=f"orcahand_{side}")
+        data = {"neutral_position": {k: float(v) for k, v in dict(cfg.neutral_position).items()},
+                "joint_roms": {k: [float(v[0]), float(v[1])]
+                               for k, v in dict(cfg.joint_roms_dict).items()}}
+        path = OUT.parent / f"hand_config_{side}.yaml"
+        path.write_text(yaml.safe_dump(data, sort_keys=True))
+        back = yaml.safe_load(path.read_text())          # vendored == live, exactly
+        assert back["neutral_position"] == data["neutral_position"]
+        assert {k: tuple(v) for k, v in back["joint_roms"].items()} \
+            == {k: tuple(v) for k, v in data["joint_roms"].items()}
+        print(f"  hand config {side}: {len(data['neutral_position'])} joints vendored + verified")
     shutil.copy(ORCA_DESC_SIBLING.parents[1] / "LICENSE", OUT.parent / "LICENSE")
     (OUT.parent / "README.md").write_text(
         "# Vendored ORCA hand model (simplified)\n\n"
