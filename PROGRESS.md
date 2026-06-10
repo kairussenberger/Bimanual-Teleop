@@ -3,6 +3,33 @@
 The repository has been reworked away from the old local MuJoCo simulator toward a
 headless body-relative teleop runtime with a Unity render stream.
 
+## 2026-06-10 (later still) — Swing–Twist Wrist: Roll Goes Straight To j6
+
+Operator feedback: wrist orientation causes "singularities"; suspected j6 missing
+from the model. j6 IS modeled (the synthetic/IK roll tests prove a pure tool-axis
+roll lands on j6), but two real failure modes existed: j6 roll headroom from the
+frozen ∓90° rest is asymmetric (±120° motor ⇒ ~+97°/−30° left, mirrored right),
+and once j6 saturated — or the roll axis wasn't exactly the tool axis — the
+orientation QP smeared the remaining roll onto j4/j5, folding the wrist through
+its singularity.
+
+Change (`arms/ik.py`): the orientation stage is now swing–twist. The twist
+component of the orientation error about the CURRENT j6/tool axis is computed
+analytically and assigned DIRECTLY to j6 (rate-limited, limit-clamped); the
+remaining swing is solved by the QP on j4-j5 only, with the unrealizable twist
+remainder REMOVED from its target so the swing joints never contort to fake a
+roll. Position/swing remain real QP diff-IK.
+
+New tests: roll beyond j6 range ⇒ j6 pins at its limit, j4/j5 move <3°, arm
+still, residual error ≈ exactly the dropped twist; combined twist+swing converges
+<2° with j6 carrying the twist. 149 tests + full verify_stack pass.
+
+Honest physics that remains: genuinely large tool-axis RE-AIMS (the recorded
+diagonal-axis roll demands them) are real j4/j5 swings bounded by j5's hard ±90°,
+and roll headroom depends on roll direction per side because the rest pose is
+frozen at ∓90°. The analyzer's IK-tracking metric reports exactly these
+saturations (median ~11° on the high-roll recording) without contortion.
+
 ## 2026-06-10 (later) — Absolute Body-Anchored Position Mapping
 
 Operator feedback on the rendered replay: "this is all happening in front of me,

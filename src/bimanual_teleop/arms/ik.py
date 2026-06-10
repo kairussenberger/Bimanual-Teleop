@@ -6,14 +6,22 @@ mink/MuJoCo backend — same two-stage algorithm, same joint/velocity limits, sa
 posture task; only the solver engine changed (invariant #2: still a real QP diff-IK,
 never a hand-rolled pseudoinverse).
 
-TWO-STAGE solve (the key to clean teleop on this arm):
+THREE-STAGE solve (the key to clean teleop on this arm):
   1. POSITION — move j1-j3 (the arm) to the target wrist position. j4-j6 frozen.
-  2. ORIENTATION — move j4-j6 (the wrist) to match the target hand orientation.
-     j1-j3 frozen.
-So the arm never swings to orient the wrist (no jerk), and the hand orientation is
-matched about the correct axes by real IK. The freeze is implemented by mutating the
-model's per-joint velocity limit between stages (pink's VelocityLimit re-reads it each
-solve), so a pure ROLL lands on j6 (the wrist-roll motor) instead of swinging j4.
+  2. TWIST — the roll component of the remaining orientation error about the
+     CURRENT j6/tool axis is computed analytically (swing–twist decomposition)
+     and assigned DIRECTLY to j6, rate-limited and clamped to its limits. Pure
+     wrist roll therefore lands on j6 BY CONSTRUCTION, and roll beyond j6's
+     range SATURATES instead of being smeared onto j4/j5 — chasing unreachable
+     roll with the wrist QP is what used to fold the wrist through its
+     singularity.
+  3. SWING — a QP step on j4-j5 only (j1-j3 and j6 frozen) re-aims the tool
+     axis for the residual orientation, with the unrealizable twist remainder
+     REMOVED from the target so the swing joints never try to fake a roll.
+The freezes are implemented by mutating the model's per-joint velocity limit
+between stages (pink's VelocityLimit re-reads it each solve). The analytic twist
+is an exact 1-DoF assignment to the motor whose axis IS the twist axis — the
+swing/position stages remain real QP diff-IK (invariant #2).
 
 JOINT LIMITS & COLLISIONS (spec invariant #5 + Section 8):
   - Hard limits live on the Pinocchio model (lower/upperPositionLimit) AND are enforced
@@ -34,8 +42,23 @@ import pink
 from pink.tasks import FrameTask, PostureTask
 from pink.limits import ConfigurationLimit, VelocityLimit
 
-from ..vr.frames import SE3
+from ..vr.frames import SE3, R_to_quat, quat_to_R
 from .yam_pin import build_arm_model, joint_local_axis
+
+
+def swing_twist_angle(R_err: np.ndarray, axis: np.ndarray) -> float:
+    """Signed angle of the TWIST component of R_err about unit `axis`, from the
+    swing–twist decomposition R_err = R_swing · R_twist(axis, angle). Wrapped to
+    [-π, π]; 0 when R_err has no component about the axis."""
+    q = R_to_quat(R_err)
+    if q[0] < 0.0:
+        q = -q                                  # shortest-arc representation
+    proj = float(q[1:] @ axis)
+    n = float(np.hypot(q[0], proj))
+    if n < 1e-12:
+        return 0.0
+    ang = 2.0 * np.arctan2(proj / n, q[0] / n)
+    return float((ang + np.pi) % (2.0 * np.pi) - np.pi)
 
 class ArmIK:
     ELBOW = 2   # index of j3, the elbow joint (soft limit caps its hyperextension)
@@ -181,24 +204,57 @@ class ArmIK:
         if free_arm:
             vl[self.wrist_v] = self.froze   # stage 1: arm free, wrist frozen
         else:
-            vl[self.arm_v] = self.froze     # stage 2: wrist free, arm frozen
+            vl[self.arm_v] = self.froze     # legacy full-wrist stage (kept for API)
         self.model.velocityLimit = vl
+
+    def _set_swing_velocity(self) -> None:
+        """Stage 3: only the swing joints j4/j5 free; arm AND j6 frozen (the twist
+        was already assigned analytically)."""
+        vl = np.full(self.model.nv, self.froze)
+        vl[self.wrist_v[0]] = self.max_vel
+        vl[self.wrist_v[1]] = self.max_vel
+        self.model.velocityLimit = vl
+
+    def _apply_twist(self, target_R: np.ndarray, budget: float) -> np.ndarray:
+        """Stage 2: assign the roll component of the orientation error directly to
+        j6 (rate-limited, limit-clamped) and return the stage-3 SWING target with
+        the unrealizable twist remainder removed."""
+        R_c = self.fk_ee().rotation().as_matrix()
+        a = self._joint_axis_base(self.joints[5])
+        a = a / (np.linalg.norm(a) + 1e-12)
+        R_err = target_R @ R_c.T
+        phi = swing_twist_angle(R_err, a)
+        iq = self._idx_q[5]
+        q = self.config.q.copy()
+        q5_new = float(np.clip(q[iq] + np.clip(phi, -budget, budget),
+                               self.soft_lo[5], self.soft_hi[5]))
+        applied = q5_new - float(q[iq])
+        if abs(applied) > 1e-12:
+            q[iq] = q5_new
+            self.config.update(q)
+        # R_err = R_swing · Rot(a, φ)  ⇒  swing-only residual target excludes the
+        # twist we could not (or chose not yet to) apply:
+        rot = lambda ang: quat_to_R([np.cos(ang / 2.0), *(np.sin(ang / 2.0) * a)])
+        return R_err @ rot(applied - phi) @ R_c
 
     def solve(self, target: SE3, iters: int | None = None) -> np.ndarray:
         iters = self.iters if iters is None else iters
         tgt = target.to_pin()
         self.pos_task.set_target(tgt)
-        self.ori_task.set_target(tgt)
         self._set_stage_velocity(free_arm=True)    # stage 1: position → arm joints j1-j3
         for _ in range(iters):
             v = pink.solve_ik(self.config, [self.pos_task, self.posture], self.dt,
                               self.solver, damping=self.damping, limits=self.limits,
                               safety_break=False)
             self.config.integrate_inplace(v, self.dt)
-        self._set_stage_velocity(free_arm=False)   # stage 2: orientation → wrist joints j4-j6
+        # stage 2: TWIST → j6 directly (rate budget matches what the QP stages get)
+        target_R = target.rotation().as_matrix()
+        swing_R = self._apply_twist(target_R, budget=self.max_vel * self.dt * iters)
+        self.ori_task.set_target(SE3.from_rotation_and_translation(
+            swing_R, target.translation()).to_pin())
+        self._set_swing_velocity()                 # stage 3: SWING → j4/j5 only
         for _ in range(iters):
-            # posture (weak) pulls the free wrist joints toward home, so a pure ROLL is
-            # taken by j6 (the hand-axis roll joint) instead of swinging j4.
+            # posture (weak) pulls the free swing joints toward home.
             v = pink.solve_ik(self.config, [self.ori_task, self.posture], self.dt,
                               self.solver, damping=self.damping, limits=self.limits,
                               safety_break=False)

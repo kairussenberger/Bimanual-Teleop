@@ -93,3 +93,61 @@ def test_pure_roll_is_realised_on_j6():
     assert abs(dq[3]) < 0.02 and abs(dq[4]) < 0.02   # wrist pitch/yaw barely move
     assert np.all(np.abs(dq[:3]) < 0.02)       # the ARM (j1-j3) does not arc to roll
     assert ik.within_limits()
+
+
+def test_roll_beyond_j6_range_saturates_without_contortion():
+    """When the commanded roll exceeds j6's travel, j6 must pin at its limit and
+    the unrealizable remainder must be DROPPED — not smeared onto j4/j5 (the
+    wrist-singularity contortion the swing–twist decomposition exists to kill)."""
+    ik = ArmIK(load_rig(), "left")
+    ik.reset()
+    q0 = ik.q.copy()
+    wrist_p = ik.fk_wrist().translation()
+    ee_R0 = ik.fk_ee().rotation().as_matrix()
+    j6_axis = ik._joint_axis_base(ik.joints[5])
+    j6_axis = j6_axis / np.linalg.norm(j6_axis)
+    align = np.abs(ee_R0.T @ j6_axis)
+    ee_tool = ee_R0[:, int(np.argmax(align))]
+
+    # Left j6 home is -90°; its NEGATIVE travel to the limit is only ~0.52 rad.
+    headroom = float(q0[5] - ik.soft_lo[5])
+    theta = -(headroom + 0.7)                       # demand ~40° more than exists
+    sign = np.sign(ee_tool @ j6_axis) or 1.0        # tool axis vs joint axis sense
+    tgt_R = _axis_angle_R(ee_tool, sign * theta) @ ee_R0
+    target = SE3.from_rotation_and_translation(SO3.from_matrix(tgt_R), wrist_p)
+    for _ in range(200):
+        ik.solve(target)
+
+    dq = ik.q - q0
+    assert abs(dq[5] - (-headroom)) < 0.02          # j6 pinned at its limit
+    assert abs(dq[3]) < 0.05 and abs(dq[4]) < 0.05  # NO swing contortion for roll
+    assert np.all(np.abs(dq[:3]) < 0.02)            # arm does not arc
+    assert ik.within_limits()
+    # The residual orientation error equals the dropped twist (graceful saturation).
+    err = _ori_err_deg(ik.fk_ee().rotation().as_matrix(), tgt_R)
+    assert abs(err - np.degrees(0.7)) < 3.0
+
+
+def test_twist_plus_swing_decomposition_converges():
+    """A combined command (re-aim the tool axis AND roll about it) must converge,
+    with the roll component carried by j6."""
+    ik = ArmIK(load_rig(), "left")
+    ik.reset()
+    q0 = ik.q.copy()
+    wrist_p = ik.fk_wrist().translation()
+    ee_R0 = ik.fk_ee().rotation().as_matrix()
+    j6_axis = ik._joint_axis_base(ik.joints[5])
+    align = np.abs(ee_R0.T @ (j6_axis / np.linalg.norm(j6_axis)))
+    tool_col = int(np.argmax(align))
+    ee_tool = ee_R0[:, tool_col]
+    swing_axis = ee_R0[:, (tool_col + 1) % 3]       # any EE axis ⊥ the tool axis
+
+    twist, swing = 0.5, 0.3                          # both inside limits
+    tgt_R = _axis_angle_R(swing_axis, swing) @ _axis_angle_R(ee_tool, twist) @ ee_R0
+    target = SE3.from_rotation_and_translation(SO3.from_matrix(tgt_R), wrist_p)
+    for _ in range(300):
+        ik.solve(target)
+
+    assert _ori_err_deg(ik.fk_ee().rotation().as_matrix(), tgt_R) < 2.0
+    assert abs(abs(ik.q[5] - q0[5]) - twist) < 0.2   # j6 carries ~the twist
+    assert ik.within_limits()

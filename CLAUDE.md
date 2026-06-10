@@ -83,9 +83,18 @@ uv run python -m bimanual_teleop.launch.run_teleop --vr replay session.npz --viz
 Arm IK lives in `src/bimanual_teleop/arms/ik.py` and uses Pinocchio/pink:
 
 1. Solve wrist position with j1-j3 while j4-j6 are velocity-limited near zero.
-2. Solve hand orientation with j4-j6 while j1-j3 are velocity-limited near zero.
-3. Enforce soft limits around the configured rest pose, including the elbow floor.
-4. Keep pure wrist roll on j6.
+2. Assign the TWIST (roll about the current j6/tool axis) of the orientation
+   error DIRECTLY to j6 via the analytic swing–twist decomposition —
+   rate-limited and clamped, so roll beyond j6's range saturates gracefully.
+3. Solve the residual SWING with j4-j5 only (j6 frozen), with the unrealizable
+   twist remainder removed from the target so the swing joints never contort
+   through the wrist singularity to fake a roll.
+4. Enforce soft limits around the configured rest pose, including the elbow floor.
+
+Pure wrist roll lands on j6 BY CONSTRUCTION
+(`tests/test_ik.py::test_roll_beyond_j6_range_saturates_without_contortion` pins
+the saturation behavior). Mind the physical j6 range: ±120° motor with the frozen
+rest at ∓90° leaves asymmetric roll headroom per side.
 
 Do not reintroduce a hand-rolled Jacobian solver for arm control. If IK behavior
 regresses, use `scripts/run_synthetic.py` first; it isolates line/circle/roll/pitch
