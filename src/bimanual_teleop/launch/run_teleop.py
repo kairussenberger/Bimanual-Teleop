@@ -59,6 +59,8 @@ def main() -> int:
     ap.add_argument("--duration", type=float, default=0.0, help="stop after N seconds (0 = run until Ctrl+C)")
     ap.add_argument("--calib-seconds", type=float, default=None,
                     help="override vr.calib_seconds for deterministic smoke/replay runs")
+    ap.add_argument("--loop", action="store_true",
+                    help="with --vr replay: loop the recording forever (demos/dashboard)")
     ap.add_argument("--record", metavar="PATH", default=None,
                     help="write VR frames + engage state to a replayable .npz session")
     ap.add_argument("--viz", action="store_true",
@@ -80,6 +82,7 @@ def main() -> int:
         if not args.replay_path:
             ap.error("--vr replay needs a session file: run_teleop --vr replay session.npz")
         rig["vr"]["replay_path"] = args.replay_path
+        rig["vr"]["replay_loop"] = bool(args.loop)
 
     src = make_source(rig)
     clutch_name = args.clutch or ("recorded" if args.vr == "replay" else "always")
