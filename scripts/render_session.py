@@ -34,6 +34,7 @@ from bimanual_teleop.vr.calibrate import body_relative_hand_sample, head_op_axes
 from bimanual_teleop.vr.frames import quat_to_R, rotvec              # noqa: E402
 from bimanual_teleop.vr.replay import ReplaySource                   # noqa: E402
 
+from bimanual_teleop.viz.hand_geom import hand_basis_for_side, orca_hand_tris_ee  # noqa: E402
 from bimanual_teleop.viz.yam_meshes import load_arm_meshes, load_stand_meshes, world_tris  # noqa: E402
 
 # WebXR 25-joint finger chains (W3C order), wrist = 0
@@ -45,11 +46,14 @@ ARM_RGB = {"left": (0.62, 0.74, 0.93), "right": (0.92, 0.56, 0.35)}
 
 
 class NullSink:
+    def __init__(self):
+        self.hands = {}
+
     def set_arm(self, side, q):
         pass
 
     def set_hand(self, side, joints):
-        pass
+        self.hands[side] = dict(joints)
 
 
 def shaded_colors(tris: np.ndarray, base_rgb, light=(0.4, 0.3, 0.85)) -> np.ndarray:
@@ -67,7 +71,8 @@ def shaded_colors(tris: np.ndarray, base_rgb, light=(0.4, 0.3, 0.85)) -> np.ndar
 # --------------------------------------------------------------------------- #
 def capture(path: str, rig: dict):
     src = ReplaySource(path)
-    engine = TeleopEngine(rig, NullSink())
+    sink = NullSink()
+    engine = TeleopEngine(rig, sink)
     torso = np.asarray(rig["vr"]["torso_from_head"], float)
     anchors = {s: {"R": None, "ee": None, "prev": None} for s in SIDES}
     frames = []
@@ -75,10 +80,16 @@ def capture(path: str, rig: dict):
         t_i = float(src.t[i])
         fr = src.frame_at(t_i)
         engine.tick(fr, src.engaged_at(t_i), t_i)
-        rec = {"t": t_i - float(src.t[0]), "q": {}, "hand": {}, "ang": {}}
+        rec = {"t": t_i - float(src.t[0]), "q": {}, "hand": {}, "ang": {}, "hand_q": {}, "ee_T": {}}
         for s in SIDES:
             arm = engine.arm[s]
             rec["q"][s] = arm.ik.q
+            rec["hand_q"][s] = dict(sink.hands.get(s, {}))
+            ee = arm.ik.fk_ee()
+            T = np.eye(4)
+            T[:3, :3] = arm.base_R @ ee.rotation().as_matrix()
+            T[:3, 3] = arm.base_R @ ee.translation() + arm.base_pos
+            rec["ee_T"][s] = T
             hs = fr.hands.get(s)
             a = anchors[s]
             m = arm.mapper
@@ -110,6 +121,12 @@ def make_renderer(rig: dict, frames: list, fig, debug_links: bool = False):
 
     arms = {s: load_arm_meshes(s) for s in SIDES}
     stand = load_stand_meshes(rig["stand"]["pos"][2], 600)
+    from bimanual_teleop.arms.ik import ArmIK
+    from bimanual_teleop.vr.frames import quat_to_R as _q2R
+    hand_basis = {}
+    for s in SIDES:
+        ikb = ArmIK(rig, s)
+        hand_basis[s] = hand_basis_for_side(ikb, _q2R(rig["arms"][s]["base_quat"]), s)
     base_T = {}
     for s in SIDES:
         T = np.eye(4)
@@ -151,6 +168,12 @@ def make_renderer(rig: dict, frames: list, fig, debug_links: bool = False):
             for tw in world_tris(model, data, items, f["q"][s], base_T[s]):
                 axr.add_collection3d(Poly3DCollection(
                     tw, facecolors=shaded_colors(tw, ARM_RGB[s]), edgecolors="none"))
+            if f.get("hand_q", {}).get(s) is not None and f.get("ee_T", {}).get(s) is not None:
+                Th = f["ee_T"][s]
+                ht = orca_hand_tris_ee(f["hand_q"][s], hand_basis[s], mirror=(s == "left"))
+                ht = ht @ Th[:3, :3].T + Th[:3, 3]
+                axr.add_collection3d(Poly3DCollection(
+                    ht, facecolors=shaded_colors(ht, (0.82, 0.77, 0.70)), edgecolors="none"))
             T_ee = base_T[s] @ data.oMi[model.njoints - 1].homogeneous
             for k, c in enumerate(TRIAD_RGB):
                 v = T_ee[:3, 3] + 0.11 * T_ee[:3, k]

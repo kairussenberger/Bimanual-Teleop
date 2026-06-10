@@ -58,7 +58,34 @@ class MeshAssets:
             self.geoms[side] = [it["tris"].reshape(-1).round(5).tolist() for it in items]
         self.geoms["stand"] = [t.reshape(-1).round(5).tolist()
                                for t in load_stand_meshes(rig["stand"]["pos"][2], 380)]
+        # Articulated stylized ORCA hands (no official meshes exist): per-side
+        # canonical→EE basis registered from the rest contract.
+        from bimanual_teleop.arms.ik import ArmIK
+        from bimanual_teleop.viz.hand_geom import hand_basis_for_side, orca_hand_tris_ee
+        self._hand_tris = orca_hand_tris_ee
+        self._q2R = quat_to_R
+        self.hand_basis = {}
+        for side in ("left", "right"):
+            ik = ArmIK(rig, side)
+            self.hand_basis[side] = hand_basis_for_side(ik, self.base_T[side][:3, :3], side)
         self._lock = threading.Lock()
+
+    def hand_world(self, state: dict) -> dict:
+        """World-frame articulated hand triangles from the streamed EE pose +
+        17 ORCA joint angles (hand_render)."""
+        out = {}
+        hr = state.get("hand_render") or {}
+        for side in ("left", "right"):
+            a = (state.get("arms") or {}).get(side) or {}
+            h = hr.get(side) or {}
+            if not a.get("ee_pos") or not a.get("ee_quat") or not h.get("q"):
+                continue
+            joints = dict(zip(h.get("names", []), h["q"]))
+            tris = self._hand_tris(joints, self.hand_basis[side], mirror=(side == "left"))
+            R = self._q2R(a["ee_quat"])
+            tris = tris @ R.T + np.asarray(a["ee_pos"], dtype=float)
+            out[side] = tris.reshape(-1).round(5).tolist()
+        return out
 
     def transforms(self, arms_state: dict) -> dict:
         """Per-geom world 4×4 (row-major, flattened) for the streamed joint state."""
@@ -224,7 +251,7 @@ function meshInto(s,cam,T,verts,base,alpha){
       X([verts[i+6],verts[i+7],verts[i+8]]),base,alpha);
 }
 const EYE16=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
-function robotInto(s,cam,st,meshT,alpha){
+function robotInto(s,cam,st,meshT,alpha,handMesh){
  let bases=[];
  if(MESH&&MESH.stand)for(const g of MESH.stand)meshInto(s,cam,EYE16,g,[88,98,112],alpha);
  for(const side of['left','right']){
@@ -239,6 +266,8 @@ function robotInto(s,cam,st,meshT,alpha){
    if(a.ee_quat){const C=quat2cols(a.ee_quat),L=0.09;
     for(let k=0;k<3;k++)seg(s,cam,a.ee_pos,[a.ee_pos[0]+C[k][0]*L,a.ee_pos[1]+C[k][1]*L,a.ee_pos[2]+C[k][2]*L],TRIAD[k],2.4)}}
   if(a.cmd_pos){ring(s,cam,a.cmd_pos,[65,217,141],7);if(a.ee_pos)seg(s,cam,a.ee_pos,a.cmd_pos,[65,217,141],1.4)}}
+ if(handMesh)for(const side of['left','right'])
+  if(handMesh[side])meshInto(s,cam,EYE16,handMesh[side],[205,192,172],alpha);
  if(bases.length===2&&(!MESH||!MESH.stand))seg(s,cam,bases[0],bases[1],[40,47,60],9);
  return bases;
 }
@@ -259,10 +288,10 @@ function drawHands(st){
  }
  flush(scH);
 }
-function drawRobot(st,meshT){clearCv(scR);const cam=camOf(scR);grid(scR,cam,0);robotInto(scR,cam,st,meshT,null);flush(scR)}
-function drawOverlay(st,meshT){
+function drawRobot(st,meshT,hm){clearCv(scR);const cam=camOf(scR);grid(scR,cam,0);robotInto(scR,cam,st,meshT,null,hm);flush(scR)}
+function drawOverlay(st,meshT,hm){
  clearCv(scO);const cam=camOf(scO);grid(scO,cam,0);
- const bases=robotInto(scO,cam,st,meshT,0.85);
+ const bases=robotInto(scO,cam,st,meshT,0.85,hm);
  if(bases.length===2&&st.op&&st.op.hands){
   const an=[(bases[0][0]+bases[1][0])/2,(bases[0][1]+bases[1][1])/2,(bases[0][2]+bases[1][2])/2-0.15];
   dot(scO,cam,an,GOLD,5);
@@ -313,7 +342,7 @@ async function tick(){
     chip(id,tr?(en?'ok':'warn'):'bad',`${id==='L'?'LEFT':'RIGHT'} ${tr?(en?'tracked + engaged':'tracked'):'NO TRACKING'}`)}
    const c=$('calib');
    if(s.status.calib&&s.status.calib.msg){c.style.display='';c.className='chip warn';c.textContent='calib: '+s.status.calib.msg}else c.style.display='none';
-   drawHands(s);drawRobot(s,d.mesh_T);drawOverlay(s,d.mesh_T);
+   drawHands(s);drawRobot(s,d.mesh_T,d.hand_mesh);drawOverlay(s,d.mesh_T,d.hand_mesh);
    $('cardL').innerHTML=card('left',s);$('cardR').innerHTML=card('right',s);
   }
  }catch(e){chip('conn','bad','dashboard error')}
@@ -352,8 +381,10 @@ def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None,
                 if meshes is not None and snap.get("state"):
                     try:
                         snap["mesh_T"] = meshes.transforms(snap["state"].get("arms", {}))
+                        snap["hand_mesh"] = meshes.hand_world(snap["state"])
                     except Exception:
                         snap["mesh_T"] = {}
+                        snap["hand_mesh"] = {}
                 body = json.dumps(snap).encode()
                 ctype = "application/json"
             elif self.path.startswith("/meshes"):

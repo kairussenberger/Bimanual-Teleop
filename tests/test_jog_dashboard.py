@@ -123,3 +123,21 @@ def test_dashboard_serves_meshes_and_mesh_transforms():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_dashboard_articulated_hand_mesh_follows_joints():
+    """hand_world builds finite world triangles from the streamed EE pose + ORCA
+    joint angles, and a fist measurably differs from an open hand."""
+    import numpy as np
+    from bimanual_teleop.hands.joint_map import ORCA_JOINT_ORDER
+    mod = _load("dashboard")
+    assets = mod.MeshAssets(max_tris_per_link=60)
+    arms = {"right": {"ee_pos": [-0.3, 0.1, 1.0], "ee_quat": [1.0, 0.0, 0.0, 0.0]}}
+    open_q = [0.0] * 17
+    fist_q = [80.0 if ("mcp" in n or "pip" in n) else 0.0 for n in ORCA_JOINT_ORDER]
+    hm_open = assets.hand_world({"arms": arms, "hand_render": {"right": {"names": list(ORCA_JOINT_ORDER), "q": open_q}}})
+    hm_fist = assets.hand_world({"arms": arms, "hand_render": {"right": {"names": list(ORCA_JOINT_ORDER), "q": fist_q}}})
+    a, b = np.asarray(hm_open["right"]), np.asarray(hm_fist["right"])
+    assert a.shape == b.shape and np.all(np.isfinite(a)) and np.all(np.isfinite(b))
+    assert np.linalg.norm(a - b) > 0.05                      # the fingers actually moved
+    assert np.linalg.norm(a.reshape(-1, 3).mean(0) - [-0.3, 0.1, 1.0]) < 0.2   # attached at the EE
