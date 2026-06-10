@@ -114,6 +114,17 @@ def main() -> int:
     require(np.allclose(hi, EXPECTED_LIMITS_HI, atol=1e-9),
             "arms.joint_limits.upper must match the MJCF-derived YAM joint limits")
 
+    hw = rig.get("hardware", {})
+    scale = float(hw.get("max_vel_scale", float("nan")))
+    require(np.isfinite(scale) and 0.0 < scale <= 1.0,
+            "hardware.max_vel_scale must be in (0, 1] — real motors run derated, never faster than sim")
+    rate = float(hw.get("rate_limit", float("nan")))
+    require(np.isfinite(rate) and 0.0 < rate <= 3.0,
+            "hardware.rate_limit must be a sane per-joint speed cap (0, 3] rad/s")
+    smooth = float(hw.get("smooth_hz", float("nan")))
+    require(np.isfinite(smooth) and 0.0 < smooth <= 12.0,
+            "hardware.smooth_hz must be finite in (0, 12] (command-shaper bandwidth)")
+
     workspace = rig.get("safety", {}).get("workspace", {})
     wmin = check_vector("safety.workspace.min", workspace.get("min"), 3)
     wmax = check_vector("safety.workspace.max", workspace.get("max"), 3)

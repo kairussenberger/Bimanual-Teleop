@@ -3,6 +3,45 @@
 The repository has been reworked away from the old local MuJoCo simulator toward a
 headless body-relative teleop runtime with a Unity render stream.
 
+## 2026-06-10 (hardening pass) — Hardware Safety, Dashboard, Keyboard Jog, Architecture
+
+Operator sign-off on the mapping ("working now, perfect") triggered the
+production-readiness pass:
+
+- `safety/shaper.py` — JointCommandShaper, the last line of defense at the
+  hardware boundary: every CAN command limit-clamped to the PHYSICAL hardstops,
+  per-joint speed-capped (`hardware.rate_limit`, default 1.2 rad/s), and smoothed
+  by a critically-damped second-order tracker (`hardware.smooth_hz`, the
+  command-side "PD" feeding the YAM's motor-side MIT PD). Initializes from the
+  arm's MEASURED pose (no startup snap; supersedes the never-implemented
+  `safety.ramp_s`). Fail-closed on non-finite targets; sub-stepped so loop
+  hiccups cannot violate the rate cap. Six unit tests pin all guarantees.
+- `HardwareSink` now commands ONLY through the shaper; `run_hw` derates
+  `ik.max_vel` by `hardware.max_vel_scale` (default 0.35). Rig contract enforces
+  sane hardware-section values.
+- `scripts/dashboard.py` — stdlib-only browser dashboard consuming the existing
+  Unity TCP JSON stream: connection/age/Hz, per-side TRACKED/ENGAGED chips,
+  calibration banner, drag-to-rotate 3D view (both arms, cmd-vs-achieved EE,
+  operator torso→wrist vectors), per-joint angle tables with limit-margin
+  highlighting, cmd−ee errors. Verified end-to-end against a live fake session
+  (connected, 105 Hz, real q + wrist vectors over HTTP).
+- `scripts/jog_arms.py` — keyboard jog through the REAL ArmIK and the same sinks
+  (render for sim preview, `--sink hw` for the Linux host through the shaper):
+  per-joint stepping with soft-limit clamps, world-frame EE nudges via the
+  two-stage solve, home, live dashboard publishing. JogSession unit-tested.
+- `docs/ARCHITECTURE.md` — the one-page system map: data flow Quest→…→CAN, the
+  mapping contracts, a 13-row failsafe inventory (each layer + its test), the
+  tooling index, and the ordered sim→real hardware-day checklist for the Linux
+  host. README/CLAUDE.md point to it.
+- Fixed in passing: rig.yaml restructure had orphaned `safety.workspace` under
+  the new `hardware:` section (caught by the live smoke; full suite would have
+  caught it too — lesson: run the full suite after config surgery).
+
+158 tests + full verify_stack pass. Hardware-day items that can only be verified
+on the Linux host with motors: CAN latency under load, YamArm motor-count
+padding, ORCA serial throughput, watchdog/e-stop behavior on metal — listed in
+ARCHITECTURE.md.
+
 ## 2026-06-10 (later still) — Swing–Twist Wrist: Roll Goes Straight To j6
 
 Operator feedback: wrist orientation causes "singularities"; suspected j6 missing

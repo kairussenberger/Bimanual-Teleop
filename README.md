@@ -1,5 +1,10 @@
 # bimanual-teleop
 
+> **Start here:** `docs/ARCHITECTURE.md` — one page covering the full data flow
+> (Quest → mapping → IK → render/hardware), every failsafe layer and its test,
+> the tooling index (dashboard, keyboard jog, analyzers, renderers), and the
+> ordered sim→real hardware-day checklist.
+
 VR teleoperation for a torso humanoid: two i2rt YAM arms with wrist-roll flanges
 and two ORCA hands on an AgileX Ranger stand, driven by Meta Quest 3 / 3S hand
 tracking.
@@ -134,6 +139,24 @@ Replay uses fresh delivery timestamps for the safety supervisor, so recordings d
 not immediately look stale when replayed later. `--vr replay` uses the recorded
 engagement decisions by default; pass `--clutch always` or `--clutch gesture` only
 when deliberately testing a different engage policy on the same motion.
+
+## Dashboard And Manual Jog
+
+One browser page with every piece: stream/Quest status, tracking + engagement,
+loop rate, a drag-to-rotate 3D view of both arms with commanded-vs-achieved EE,
+operator torso→wrist vectors, and per-joint angles with limit highlighting:
+
+```sh
+uv run python scripts/dashboard.py        # http://127.0.0.1:8180
+```
+
+Drive the arms manually from the keyboard (no headset) through the same IK and
+sinks as teleop — the sim→real verification tool. `--sink hw` on the Linux host
+sends the same keystrokes to the real arms through the safety shaper:
+
+```sh
+uv run python scripts/jog_arms.py         # watch it on the dashboard/Unity
+```
 
 ## Debugging Without A Headset
 

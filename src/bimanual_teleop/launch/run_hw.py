@@ -50,6 +50,12 @@ def main() -> int:
             ap.error("--vr replay needs a session file: run_hw --vr replay session.npz")
         rig["vr"]["replay_path"] = args.replay_path
     hz = args.hz or rig["control"]["arm_hz"]
+    # Hardware speed derating: scale the IK joint-velocity budget down for real
+    # motors (the sink's JointCommandShaper independently caps speed again).
+    scale = float(rig.get("hardware", {}).get("max_vel_scale", 0.35))
+    rig["ik"]["max_vel"] = float(rig["ik"]["max_vel"]) * scale
+    print(f"[hw] ik.max_vel derated x{scale:.2f} -> {rig['ik']['max_vel']:.1f} rad/s; "
+          f"shaper rate_limit {rig.get('hardware', {}).get('rate_limit', 1.2)} rad/s")
 
     src = make_source(rig)
     clutch = RecordedClutch(src) if args.clutch == "recorded" else GestureClutch()
