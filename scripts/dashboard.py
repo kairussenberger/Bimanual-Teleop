@@ -274,8 +274,8 @@ function quat2cols(q){const[w,x,y,z]=q;return[[1-2*(y*y+z*z),2*(x*y+w*z),2*(x*z-
  [2*(x*y-w*z),1-2*(x*x+z*z),2*(y*z+w*x)],[2*(x*z+w*y),2*(y*z-w*x),1-2*(x*x+y*y)]]}
 let MESH=null,RIG=null;
 const scH=Scene($('cvH'),-2.18,0.28,430,[0,0.30,0.12]);   // hands: (right, fwd, up)
-const scR=Scene($('cvR'),1.05,0.26,300,[-0.1,-0.05,0.82]);
-const scO=Scene($('cvO'),1.05,0.24,330,[-0.12,-0.05,0.85]);
+const scR=Scene($('cvR'),-0.66,0.24,300,[-0.1,-0.05,0.82]);
+const scO=Scene($('cvO'),-0.66,0.24,330,[-0.12,-0.05,0.85]);
 function meshInto(s,cam,T,verts,base,alpha){
  const R=[[T[0],T[1],T[2]],[T[4],T[5],T[6]],[T[8],T[9],T[10]]],t=[T[3],T[7],T[11]];
  const X=v=>[R[0][0]*v[0]+R[0][1]*v[1]+R[0][2]*v[2]+t[0],
