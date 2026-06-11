@@ -62,7 +62,11 @@ HAND_PORTS = {"right": 8087, "left": 8088}
 WRIST_PORTS = {"right": 8122, "left": 8123}
 HEAD_PORT = 8200
 DRAIN_PORTS = (8095, 8100)
+# In-headset screen view (scripts/headset_view.py binds its own PUB here) —
+# tunnel-only: the link watchdog keeps its reverse alive, but it is NOT bound here.
+VIDEO_PANEL_PORT = 10505
 _ALL_PORTS = (*HAND_PORTS.values(), *WRIST_PORTS.values(), HEAD_PORT, *DRAIN_PORTS)
+_TUNNEL_PORTS = (*_ALL_PORTS, VIDEO_PANEL_PORT)
 
 
 def _S4(flip: str = "z") -> np.ndarray:
@@ -259,17 +263,17 @@ class OrbitVRSource(VRSource):
     def _adb_reverse(self) -> None:
         if not shutil.which("adb"):
             print("[orbit] adb not found — set up `adb reverse` for "
-                  f"{', '.join(map(str, _ALL_PORTS))} yourself.", flush=True)
+                  f"{', '.join(map(str, _TUNNEL_PORTS))} yourself.", flush=True)
             return
         ok = 0
-        for p in _ALL_PORTS:
+        for p in _TUNNEL_PORTS:
             try:
                 r = subprocess.run(["adb", "reverse", f"tcp:{p}", f"tcp:{p}"],
                                    capture_output=True, timeout=5)
                 ok += (r.returncode == 0)
             except (subprocess.SubprocessError, OSError):
                 pass
-        print(f"[orbit] adb reverse set on {ok}/{len(_ALL_PORTS)} ports.", flush=True)
+        print(f"[orbit] adb reverse set on {ok}/{len(_TUNNEL_PORTS)} ports.", flush=True)
 
     @staticmethod
     def _adb_device_state() -> str:
@@ -306,7 +310,7 @@ class OrbitVRSource(VRSource):
                             if a == b}
                 except (subprocess.SubprocessError, OSError, ValueError):
                     have = set()
-                missing = [p for p in _ALL_PORTS if p not in have]
+                missing = [p for p in _TUNNEL_PORTS if p not in have]
                 if missing:
                     print(f"[orbit] quest link restored, reverses missing {missing} "
                           "— re-asserting", flush=True)

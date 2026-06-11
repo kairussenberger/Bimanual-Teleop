@@ -16,6 +16,14 @@ Wire format (reverse-engineered from CameraOneStreamer.cs, verified constants):
       | width u16 LE | height u16 LE | ptsUs u64 LE | payloadLen u32 LE
       | payload (Annex-B HEVC access unit)
 
+The stream MUST be side-by-side stereo: StereoSbsRenderTexture.shader always
+maps the left half of the texture to the left eye and the right half to the
+right eye (both the legacy and the reprojection path). A mono frame puts a
+DIFFERENT half of the screen in each eye — binocular rivalry, unreadable.
+So the captured screen is duplicated into both halves (zero disparity → the
+panel reads as a flat 2D screen). Header width/height = full SBS dims;
+the reprojection config carries PER-EYE dims (half width).
+
 Every frame is encoded all-intra with VPS/SPS/PPS repeated (dump_extra), so any
 frame is a clean decoder entry point (the app's own config uses gop=1).
 
@@ -32,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import select
 import shutil
 import struct
 import subprocess
@@ -87,10 +96,12 @@ def main() -> int:
                     help="avfoundation screen index (default: auto-detect 'Capture screen 0')")
     ap.add_argument("--list-screens", action="store_true")
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--width", type=int, default=1440, help="encoded width")
+    ap.add_argument("--width", type=int, default=1440,
+                    help="PER-EYE encoded width (the SBS stream is twice this)")
     ap.add_argument("--height", type=int, default=810,
                     help="encoded height (screen is letterboxed to fit — the header must carry exact dims)")
-    ap.add_argument("--bitrate", default="12M")
+    ap.add_argument("--bitrate", default="20M",
+                    help="all-intra SBS needs headroom for legible dashboard text")
     ap.add_argument("--lavfi", default=None, help=argparse.SUPPRESS)   # self-test source (e.g. testsrc)
     args = ap.parse_args()
 
@@ -114,6 +125,13 @@ def main() -> int:
         args.screen = m.group(1)
         print(f"[headset-view] auto-detected screen device index {args.screen}")
 
+    # A wedged capture from a previous run (e.g. killed parent, orphaned ffmpeg)
+    # holds the AVCapture session and starves new captures: zero frames, no
+    # error. Reap our own stale pipelines (signature: avfoundation → raw hevc
+    # on stdout) before starting.
+    subprocess.run(["pkill", "-9", "-f", r"ffmpeg.*avfoundation.*-f hevc -$"],
+                   capture_output=True)
+
     import zmq
     ctx = zmq.Context.instance()
     pub = ctx.socket(zmq.PUB)
@@ -121,12 +139,20 @@ def main() -> int:
     pub.bind(f"tcp://127.0.0.1:{PORT}")
     _adb_reverse()
 
-    vf = (f"scale={args.width}:{args.height}:force_original_aspect_ratio=decrease,"
-          f"pad={args.width}:{args.height}:(ow-iw)/2:(oh-ih)/2")
+    # fps first: the avfoundation screen device's timestamps make ffmpeg's CFR
+    # sync duplicate frames (~270/s measured) — drop the dups before encoding.
+    # Then letterbox to one eye and duplicate into both SBS halves (docstring).
+    vf = (f"fps={args.fps},"
+          f"scale={args.width}:{args.height}:force_original_aspect_ratio=decrease,"
+          f"pad={args.width}:{args.height}:(ow-iw)/2:(oh-ih)/2,"
+          f"split=2[l][r];[l][r]hstack=inputs=2")
     if args.lavfi:
         src_args = ["-re", "-f", "lavfi", "-i", f"{args.lavfi}=rate={args.fps}"]
     else:
+        # The screen device rejects ffmpeg's default yuv420p — request one of
+        # its native formats explicitly (nv12), or the input fails to open.
         src_args = ["-f", "avfoundation", "-capture_cursor", "1",
+                    "-pixel_format", "nv12",
                     "-framerate", str(args.fps), "-i", f"{args.screen}:none"]
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *src_args,
            "-vf", vf,
@@ -135,25 +161,29 @@ def main() -> int:
            "-bsf:v", "hevc_metadata=aud=insert,dump_extra=freq=keyframe",
            "-f", "hevc", "-"]
     print("[headset-view] " + " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=sys.stderr)
+    # bufsize=0 → raw pipe: select() sees exactly what read() will return.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=sys.stderr, bufsize=0)
 
     buf = bytearray()
     t0 = time.monotonic()
     sent = 0
-    w_out, h_out = args.width, args.height
+    w_eye, h_out = args.width, args.height
+    w_out = 2 * w_eye                        # full SBS stream width (header dims)
     last_log = 0.0
     last_cfg = -10.0
 
     def send_config(now: float) -> None:
         # Minimal valid reprojection payload (flat screen: pinhole intrinsics
-        # from a chosen FOV; both eyes identical → plain 2D panel).
-        hfov, vfov = 70.0, 70.0 * h_out / w_out
-        fx = w_out / (2.0 * math.tan(math.radians(hfov) / 2.0))
+        # from a chosen FOV; both eyes identical → plain 2D panel). The app
+        # rejects any type other than this exact string (unexpected_type) and
+        # validates PER-EYE dims, so width here is the half-frame width.
+        hfov, vfov = 70.0, 70.0 * h_out / w_eye
+        fx = w_eye / (2.0 * math.tan(math.radians(hfov) / 2.0))
         fy = h_out / (2.0 * math.tan(math.radians(vfov) / 2.0))
-        eye = {"fx": fx, "fy": fy, "cx": w_out / 2.0, "cy": h_out / 2.0,
-               "width": w_out, "height": h_out,
+        eye = {"fx": fx, "fy": fy, "cx": w_eye / 2.0, "cy": h_out / 2.0,
+               "width": w_eye, "height": h_out,
                "rectified_hfov_deg": hfov, "rectified_vfov_deg": vfov}
-        payload = json.dumps({"type": "reprojection_config", "version": 1,
+        payload = json.dumps({"type": "orbit_stereo_reprojection_config", "version": 1,
                               "backend": "headset_view", "profile": "flat",
                               "left": eye, "right": eye,
                               "generated_monotonic_us": int(now * 1e6)}).encode()
@@ -162,6 +192,17 @@ def main() -> int:
         pub.send(pkt)
     try:
         while True:
+            # Without Screen Recording permission the capture device opens but
+            # delivers ZERO frames forever (no error) — fail loudly instead.
+            ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+            if not ready:
+                if sent == 0 and time.monotonic() - t0 > 8.0:
+                    print("\n[headset-view] no frames after 8s — this is almost always the "
+                          "macOS Screen Recording permission.\nGrant it to your terminal app "
+                          "(System Settings → Privacy & Security → Screen & System Audio "
+                          "Recording),\nquit+reopen the terminal, and rerun.")
+                    return 1
+                continue
             chunk = proc.stdout.read(65536)
             if not chunk:
                 err = proc.wait()
