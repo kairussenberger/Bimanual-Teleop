@@ -5,6 +5,30 @@ Each entry: what changed, why, and exactly which files were touched.
 
 ---
 
+## 2026-06-11 (8th pass) — see the dashboard INSIDE the headset (solo operation)
+
+**Why.** The ORBIT app blocks sight through the headset; working alone meant
+operating blind. The app has a built-in in-headset video panel that SUBs on
+tcp://127.0.0.1:10505 (meant for a robot camera) — it was sitting blank.
+
+**What.** NEW `scripts/headset_view.py`: captures the Mac screen with ffmpeg
+(hardware HEVC via VideoToolbox, all-intra gop=1), packetizes it in ORBIT's
+wire format (reverse-engineered from CameraOneStreamer.cs: ZMQ PUB, 'ORBT' +
+version + flags + dims + ptsUs + payloadLen + Annex-B access unit) and
+publishes on 10505 (sets up its own adb reverse). A JSON reprojection-config
+packet (pinhole intrinsics, FLAG_CONFIG) is sent every 2 s — gotcha found the
+hard way: FLAG_CONFIG packets bypass the decoder entirely, so video frames
+must never carry it. Verified end-to-end via the app's own diagnostics:
+render_state=LIVE_HEVC, packets parsed/enqueued 1:1, renderer live.
+
+**Usage.** `uv run python scripts/headset_view.py` (first run: grant the
+terminal Screen Recording permission in System Settings → Privacy & Security).
+`--list-screens`, `--fps`, `--width/--height`, `--bitrate` to tune. Quest's
+built-in double-tap-for-passthrough (Settings → Physical Space) is the
+zero-code complement for glancing at the real keyboard.
+
+---
+
 ## 2026-06-11 (7th pass) — safety: yaw lock + calibration-required, clap as pose 3/3
 
 **User requirements.** (1) Head motion (looking left/right, removing the
