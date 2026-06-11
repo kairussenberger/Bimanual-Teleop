@@ -83,7 +83,8 @@ def _split_nals(buf: bytearray):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--screen", default="1", help="avfoundation screen index (see --list-screens)")
+    ap.add_argument("--screen", default=None,
+                    help="avfoundation screen index (default: auto-detect 'Capture screen 0')")
     ap.add_argument("--list-screens", action="store_true")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--width", type=int, default=1440, help="encoded width")
@@ -100,6 +101,18 @@ def main() -> int:
         subprocess.run(["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
                        stderr=None)
         return 0
+    if args.screen is None:
+        # Auto-detect: device indices shift with cameras (Desk View, iPhone…) —
+        # a hard-coded index once streamed the Desk View camera into the headset.
+        out = subprocess.run(["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                             capture_output=True, text=True).stderr
+        import re
+        m = re.search(r"\[(\d+)\] Capture screen 0", out)
+        if not m:
+            print("[headset-view] no 'Capture screen' device found — pass --screen N (see --list-screens)")
+            return 1
+        args.screen = m.group(1)
+        print(f"[headset-view] auto-detected screen device index {args.screen}")
 
     import zmq
     ctx = zmq.Context.instance()
