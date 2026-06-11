@@ -116,6 +116,14 @@ mapping:
   robot_neutral_wrist:
     left:  [-0.22, 0.02, 0.46]
     right: [0.22, 0.02, 0.46]
+  # The robot's REST pose wrists in the same body coords (FK of neutral_q vs the
+  # chest anchor) — pose B of the TWO-POSE calibration (arms relaxed at the
+  # sides). Scales come from pose-A−pose-B DIFFERENCES, so the ORBIT recenter
+  # anchor (which shifts all hand positions by an arbitrary vector — measured
+  # 0.5 m after a desk-start) cancels exactly.
+  robot_rest_wrist:
+    left:  [-0.221, -0.437, -0.032]
+    right: [0.222, -0.440, 0.032]
   # Where the fitted scale/offset is persisted (per-machine, gitignored — like
   # config/viz_calib.json). Auto-loaded on engine start for LIVE transports only
   # (orbit/vuer); fake/replay stay identity so the acceptance gate and the session
@@ -184,11 +192,13 @@ vr:
   calib_seconds: 0.0  # arm mapping is calibration-free; >0 re-enables the optional legacy startup stillness hold (only steers arms when body_relative is false)
   cross_gap: 0.05     # min world-Y gap each hand keeps from center (anti-overlap guard, metres)
   control_port: 8201  # localhost TCP line-JSON engine commands (dashboard CALIBRATE button)
-  # ORBIT streams the head floor-anchored but the wrists EYE-anchored (measured on
-  # a real session — see vr/orbit_source.py docstring). 'head' re-anchors wrist
-  # translations at the live head pose so the absolute body-relative mapping sees
-  # one consistent origin; 'world' = raw passthrough (future fixed ORBIT builds).
-  orbit_wrist_anchor: head
+  # ORBIT streams the head floor-anchored but the wrists in a RECENTER-anchored
+  # frame (and a recenter/desk-start moves that anchor arbitrarily — measured
+  # +0.5 m once, breaking calibration). 'keypoint' rebuilds each wrist as
+  # head_pos + hand keypoint[0] (keypoints are head-anchored, world axes) —
+  # NO anchor assumption, recenter-proof. 'head' = legacy live-head re-anchor;
+  # 'world' = raw passthrough.
+  orbit_wrist_anchor: keypoint
   cert_file: cert.pem
   key_file: key.pem
   ngrok: false        # true to tunnel for the Quest browser

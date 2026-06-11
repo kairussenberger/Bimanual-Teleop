@@ -175,7 +175,8 @@ class TeleopEngine:
     def _apply_calibration(self, res, announce: str) -> None:
         for s in SIDES:
             self.arm[s].mapper.set_calibration(res.axis_scale, res.body_offset,
-                                               getattr(res, "lat_ref", 0.0))
+                                               getattr(res, "lat_ref", 0.0),
+                                               getattr(res, "lat_center", 0.0))
         self.calib_summary = res.summary()
         print(f"[calib] {announce}: axis_scale={np.round(res.axis_scale, 3).tolist()} "
               f"body_offset={np.round(res.body_offset, 3).tolist()}", flush=True)
@@ -197,7 +198,7 @@ class TeleopEngine:
             if self.neutral.active:
                 self.neutral.cancel("calibration cleared")
             for s in SIDES:
-                self.arm[s].mapper.set_calibration(np.ones(3), np.zeros(3), 0.0)
+                self.arm[s].mapper.set_calibration(np.ones(3), np.zeros(3), 0.0, 0.0)
             self.calib_summary = None
             if self._calib_file is not None:
                 try:

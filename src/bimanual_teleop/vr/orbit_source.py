@@ -127,10 +127,16 @@ class OrbitVRSource(VRSource):
         self.head_timeout = float(v.get("orbit_head_timeout", max(1.0, self.timeout)))
         self.auto_reverse = bool(v.get("orbit_adb_reverse", True))
         self.S4 = _S4(str(v.get("orbit_flip", "z")))
-        # 'head' (default): re-anchor wrist translations at the live head pose —
-        # ORBIT streams wrists eye-anchored but the head floor-anchored (see module
-        # docstring). 'world': raw passthrough.
-        self.wrist_anchor = str(v.get("orbit_wrist_anchor", "head"))
+        # Wrist translation reconstruction (see module docstring):
+        #  'keypoint' (default): head_pos + hand keypoint[0] — the keypoints are
+        #     streamed HEAD-ANCHORED (world axes), so this needs NO assumption
+        #     about the wrist stream's recenter anchor. Measured failure of
+        #     'head': starting/recentering ORBIT with the headset on the desk
+        #     moved the eye-anchor ~0.5 m down and every wrist read 0.5 m high
+        #     (calibration refused; mapping shifted).
+        #  'head': wrist-stream translation + live head (exact only while the
+        #     live head matches the recenter pose). 'world': raw passthrough.
+        self.wrist_anchor = str(v.get("orbit_wrist_anchor", "keypoint"))
         self.viz_port = int(v.get("orbit_viz_port", 8099))
         self.viz_enabled = bool(v.get("orbit_viz", True))
         self.viz_url = None
@@ -171,13 +177,16 @@ class OrbitVRSource(VRSource):
                 wrist_fresh = w is not None and (now - self._wrist_last[s]) < self.timeout
                 lm = self._lm[s] if (now - self._lm_last[s]) < self.timeout else None
                 if wrist_fresh:
-                    if self.wrist_anchor == "head" and head is not None:
-                        # ORBIT wrists are eye-anchored, the head floor-anchored:
-                        # re-anchor the TRANSLATION so both share one origin (the
+                    if head is not None and self.wrist_anchor != "world":
+                        # Rebuild the TRANSLATION in one consistent origin (the
                         # body-relative subtraction downstream then cancels the
-                        # head exactly). Rotation is already world-axes — untouched.
+                        # head exactly). Rotation is already world-axes — the
+                        # wrist stream's attitude is kept untouched.
                         w = w.copy()
-                        w[:3, 3] += head[:3, 3]
+                        if self.wrist_anchor == "keypoint" and lm is not None:
+                            w[:3, 3] = head[:3, 3] + lm[0]   # anchor-independent
+                        else:
+                            w[:3, 3] += head[:3, 3]          # 'head' / no landmarks
                     hands[s] = HandSample(tracked=True, wrist=w, landmarks=lm,
                                           pinch=_pinch_from_landmarks(lm))
                 else:

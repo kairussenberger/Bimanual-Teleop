@@ -314,6 +314,7 @@ class ClutchMapper:
         self.axis_scale = np.ones(3)
         self.body_offset = np.zeros(3)
         self.lat_ref = 0.0
+        self.lat_center = 0.0
         self.anchor_ctrl: SE3 | None = None
         self.anchor_ee: SE3 | None = None
         self._blend_t0: float | None = None
@@ -326,15 +327,18 @@ class ClutchMapper:
         self.R = np.asarray(R, dtype=float).reshape(3, 3)
         self.release()   # force a fresh anchor on next engage
 
-    def set_calibration(self, axis_scale, body_offset, lat_ref: float = 0.0) -> None:
-        """Install an operator neutral-pose POSITION calibration (body-axes
-        per-axis scale + offset; lat_ref enables the non-linear lateral ramp).
-        Releases the anchors so the next engage latches a fresh offset and the
-        arm GLIDES onto the new correspondence (the same snap-free path as any
-        re-engage)."""
+    def set_calibration(self, axis_scale, body_offset, lat_ref: float = 0.0,
+                        lat_center: float = 0.0) -> None:
+        """Install an operator POSITION calibration (body-axes per-axis scale +
+        offset; lat_ref enables the non-linear lateral ramp; lat_center = the
+        operator's measured midline, mapped onto the robot's midline — absorbs
+        the ORBIT recenter-anchor's lateral shift). Releases the anchors so the
+        next engage latches a fresh offset and the arm GLIDES onto the new
+        correspondence (the same snap-free path as any re-engage)."""
         self.axis_scale = np.asarray(axis_scale, dtype=float).reshape(3)
         self.body_offset = np.asarray(body_offset, dtype=float).reshape(3)
         self.lat_ref = max(0.0, float(lat_ref))
+        self.lat_center = float(lat_center)
         self.release()
 
     @property
@@ -342,17 +346,20 @@ class ClutchMapper:
         return self.anchor_ctrl is not None
 
     def _lat_scaled(self, lat: float) -> float:
-        """Lateral component with the non-linear ramp: s_eff = 1 at the midline
-        → axis_scale[0] at |lat| ≥ lat_ref. QUADRATIC ramp for expanding scales
+        """Lateral component with the non-linear ramp, about the OPERATOR'S
+        measured midline (lat_center — the ORBIT anchor shifts it): s_eff = 1
+        at the midline → axis_scale[0] at |lat − center| ≥ lat_ref, output
+        centered on the ROBOT midline. QUADRATIC ramp for expanding scales
         (stays ≈1:1 through clap-width laterals — measured: a linear ramp still
         amplified a real clap ×1.26); linear ramp for shrinking scales (the
         quadratic form would fold the map below s ≈ 0.67)."""
         s = float(self.axis_scale[0])
+        x = lat - self.lat_center
         if self.lat_ref <= 0.0:
-            return s * lat
-        a = min(abs(lat) / self.lat_ref, 1.0)
+            return s * x
+        a = min(abs(x) / self.lat_ref, 1.0)
         ramp = a * a if s >= 1.0 else a
-        return (1.0 + (s - 1.0) * ramp) * lat
+        return (1.0 + (s - 1.0) * ramp) * x
 
     def _p_abs(self, ctrl: SE3) -> np.ndarray:
         w = ctrl.translation()

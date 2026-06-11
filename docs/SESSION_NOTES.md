@@ -5,6 +5,58 @@ Each entry: what changed, why, and exactly which files were touched.
 
 ---
 
+## 2026-06-11 (6th pass) — TWO-POSE calibration (recenter-anchor-proof)
+
+**Why.** "The calibrate function did not work": two live sessions
+(live_0611_152433/152622) started the capture but never completed it.
+Forensics: (1) hand tracking was only ~43% that session; (2) EVERY hand
+position read ~0.5 m too high and ~0.2 m short — the ORBIT app's positions
+live in a RECENTER-ANCHORED frame, and starting the app/recentering with the
+headset on the desk moved that anchor; the head-anchored reconstruction from
+the 2nd pass assumed anchor ≈ live head and broke. There is NO in-data
+absolute reference (the hand keypoints share the same anchor — verified:
+keypoint[0] ≡ wrist-stream translation). A one-pose calibration fundamentally
+cannot separate an unknown anchor shift from the operator's proportions, and
+its absolute pose gate (forward ≥ 0.25 m) trusted the broken frame and
+refused forever. A secondary trap found on the way: the operator watches the
+dashboard during calibration, so the HEAD (and the body frame's yaw) points
+at the monitor — an absolute "forward" gate also fails for that reason.
+
+**What.** `vr/neutral_calib.py` rewritten as a TWO-POSE capture:
+  - pose A: both arms extended straight forward, hold 2.5 s;
+  - pose B: arms relaxed at the sides, hold 2.5 s (banner walks through 1/2,
+    2/2 with progress).
+  All fitted quantities are now anchor- and head-yaw-proof:
+  - operator FORWARD = horizontal direction of the A−B wrist-midpoint delta;
+  - lateral scale from the pose-A wrist SPREAD; up/forward scales from the
+    per-axis A−B deltas vs the robot's matching references
+    (`mapping.robot_neutral_wrist` ↔ A, NEW `mapping.robot_rest_wrist` — the
+    robot's actual rest pose — ↔ B): anchors cancel in every difference;
+  - the offset (pose A) absorbs the anchor; the operator's measured midline
+    (`lat_center`, new mapper field) maps to the robot's midline — the
+    non-linear lateral ramp now centers there;
+  - capture gates are RELATIVE only (stillness, lateral spread 0.2–0.8 m,
+    pose-B drop ≥ 0.22 m below pose A) — nothing trusts the broken frame.
+  Calibration file v3 (`lat_center`); v1/v2 files still load.
+  Also: `vr.orbit_wrist_anchor: keypoint` (head + keypoint[0]; numerically
+  equal to 'head' for current ORBIT builds since keypoint[0] ≡ wrist stream,
+  but conceptually direct), OFFSET_MAX 0.4 → 0.8 (must cover anatomy + anchor).
+
+**Validation.** Replaying the exact session where calibration refused: pose A
+accepted at 7.1 s, completed at 32.7 s (the operator's later arms-rest served
+as pose B), sane scales [1.41, 1.48, 1.84]. Unit suite includes THE
+regression: a constant 0.5 m anchor shift on all inputs must produce
+identical scales and map pose A exactly onto the robot neutral.
+Gate: **205 tests + probes green.**
+
+**Operator notes.** Recentering the headset mid-session moves the anchor
+again — if the mapping suddenly feels shifted, just recalibrate (8 s).
+The stale single-pose calibration file was deleted; recalibrate on the next
+session. Hand tracking was 43% in the failed session — keep hands in the
+Quest cameras' view; the TRACKED chips show per-hand status live.
+
+---
+
 ## 2026-06-11 (5th pass) — per-side hand axes, off-center claps, pair-order anti-cross
 
 **From recordings/live_0611_143958.npz** (clap landed with the hands ~26 cm
