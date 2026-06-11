@@ -204,7 +204,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  .kv b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
  .err-ok{color:var(--green)} .err-bad{color:#ff8a8a}
 </style></head><body>
-<header><b>bimanual-teleop</b>
+<header><b>bimanual-teleop</b><span class=chip style="background:#2b3550">build __BUILD__</span>
  <span id=conn class="chip bad">stream …</span><span id=hz class=chip>— Hz</span>
  <span id=L class="chip bad">LEFT —</span><span id=R class="chip bad">RIGHT —</span>
  <span id=calib class=chip style="display:none"></span>
@@ -427,6 +427,9 @@ def rig_info() -> dict:
                 for side in ("left", "right")}
 
 
+BUILD = time.strftime("%H:%M:%S")    # server start time, shown in the page header
+
+
 def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None,
                 meshes: "MeshAssets | None" = None) -> ThreadingHTTPServer:
     rig_body = json.dumps(rig or {}).encode()
@@ -454,10 +457,11 @@ def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None,
                 body = rig_body
                 ctype = "application/json"
             else:
-                body = PAGE.encode()
+                body = PAGE.replace("__BUILD__", BUILD).encode()
                 ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")   # stale tabs caused a "rollback" scare
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
