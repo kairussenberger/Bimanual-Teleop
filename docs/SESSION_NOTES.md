@@ -5,6 +5,51 @@ Each entry: what changed, why, and exactly which files were touched.
 
 ---
 
+## 2026-06-11 (9th pass) — headset view WORKS + the floating-arms calibration bug
+
+**Why (headset view).** The 8th-pass stream decoded but was unusable in the
+headset. Three stacked causes: (1) `StereoSbsRenderTexture.shader` ALWAYS
+splits the texture side-by-side — left half→left eye, right half→right eye —
+so a MONO frame put a different half of the screen in each eye (binocular
+rivalry); (2) the reprojection config type must be exactly
+`orbit_stereo_reprojection_config` with PER-EYE dims (ours was silently
+rejected as `unexpected_type`); (3) the avfoundation screen device needs an
+explicit `-pixel_format nv12`, and WEDGED ffmpeg captures from earlier runs
+starve new ones (zero frames, no error — two 4-hour-old orphans were doing
+exactly that).
+
+**What (headset view, `scripts/headset_view.py` + `vr/orbit_source.py`).**
+The captured screen is letterboxed to one eye then DUPLICATED into both SBS
+halves (header 2880×810, per-eye 1440×810, zero disparity → flat 2D panel);
+config type/dims fixed; `fps=` filter clamps CFR-sync duplicate frames
+(~270/s → 30); stale pipelines reaped at startup + an 8 s no-frames watchdog;
+`VIDEO_PANEL_PORT 10505` added to the quest-link watchdog's tunnel list
+(tunnel-only, never PULL-bound). **CONFIRMED working in-headset.**
+
+**Why (calibration).** After the 7th-pass clap calibration, the arms hovered
+at the workspace ceiling. Forensics on the recorded session
+(`live_0611_204016.npz` + the persisted fit's meta): ORBIT's wrist and head
+streams recenter-anchor INDEPENDENTLY — the wrists measured ~1.35 m above
+the torso proxy ALL session. The fit's offset is the designed absorber, but
+`fit_two_pose` clipped it at ±0.8 m (needed −2.19) → +1.4 m baked into every
+up-target. Earlier sessions only worked because the mismatch stayed < 0.8 m.
+
+**What (calibration, `vr/neutral_calib.py` + `engine.py`).** The fitted
+offset is NEVER clipped (finite-only; `OFFSET_MAX` 0.8→10.0, demoted to a
+load-time corruption screen). Capture order is now REST → CLAP →
+EXTENDED-FORWARD LAST (pose A maps onto the robot neutral by construction,
+so the arms engage gliding onto a correspondence the operator already
+holds). Engine yaw latch hardened: NaN warm-up / looking-straight-down head
+samples never latch the session yaw frame (`TeleopEngine._head_latchable`,
+fail-closed until a sane head arrives — a replay's first head sample IS
+NaN). Validated against the broken recording end-to-end: the held
+outstretched pose lands within 1.5 cm of the robot neutral through the live
+mapper (the clipped offset commanded +1.39 m above it). README steps 4–5
+updated; regression tests pin the real-session fit, the load bounds, and the
+latch guard. **CONFIRMED working live.**
+
+---
+
 ## 2026-06-11 (8th pass) — see the dashboard INSIDE the headset (solo operation)
 
 **Why.** The ORBIT app blocks sight through the headset; working alone meant

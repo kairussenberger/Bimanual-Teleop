@@ -54,16 +54,21 @@ degrees (never goes through arm IK).
 
 ## The Mapping Contracts (CLAUDE.md is normative)
 
-- **Position — absolute, body-anchored.** Robot chest = your torso. No
-  calibration; per-user variation is absorbed by `vr.torso_from_head` (sternum
-  offset below the headset — the only knob that is *about the operator*, default
-  fits most adults) and `mapping.pos_scale`.
-- **Orientation — relative, world-frame.** Rotation since clutch-engage about
-  your body axes maps to the same rotation about robot world axes. No stance
-  calibration; `vr.calib_seconds` defaults to 0 (the old 5 s hold is legacy).
+- **Position — absolute, body-anchored.** Robot chest = your torso. Live
+  transports require an in-session GUIDED CALIBRATION (`vr/neutral_calib.py`,
+  three held poses: rest → clap → extended-forward LAST): per-axis scale, the
+  clap-anchored lateral curve, and an offset that absorbs the ORBIT recenter
+  anchors — the wrist and head streams anchor INDEPENDENTLY, metres apart in
+  practice, so the fitted offset is NEVER clipped. `vr.torso_from_head` and
+  `mapping.pos_scale` remain the static knobs.
+- **Orientation — absolute, calibration-free.** The robot hand WEARS the
+  operator's hand attitude through fixed conventions (see CLAUDE.md). No
+  stance calibration ever; `vr.calib_seconds` defaults to 0 (the old 5 s hold
+  is legacy).
 - Proven on a real recorded session via `scripts/analyze_session.py`:
   orientation axis error 1.4° median, absolute position correspondence 0.1 cm
-  median.
+  median; the calibration fit lands the held extended pose within 1.5 cm of
+  the robot neutral (replayed from a real session).
 
 ## Failsafe Inventory (every layer, where it lives, how it's tested)
 
@@ -74,6 +79,7 @@ degrees (never goes through arm IK).
 | 3 | Deadman release | supervisor + clutch | releasing the clutch on a LIVE feed disengages immediately | `test_clutch_release_disengages_immediately` |
 | 4 | Latched e-stop | supervisor | zeros engagement until deliberate `reset()`; run_hw releases torque on exit | same |
 | 5 | Fail-closed parsing | sources + calibrate | malformed/non-finite poses, missing head ⇒ hand reads UNTRACKED, never identity/raw fallback | pipeline gating tests |
+| 5b | Yaw-latch guard | `engine.py` `_head_latchable` | NaN warm-up / looking-straight-down head samples never latch the session yaw frame (would poison every body-relative sample); fail closed until a sane head arrives | `test_engine_yaw_latch_skips_degenerate_head_samples` |
 | 6 | Engage glide | `ClutchMapper` | target equals current EE at engage; absolute correspondence reached over `engage_blend_s` | `test_absolute_position_glides_to_chest_correspondence` |
 | 7 | Workspace box | `arm_control.py` | EE targets clamped to `safety.workspace` (base frame) | motion tests |
 | 8 | Anti-cross guard | `arm_control.py` | each hand pinned to its own side of world-Y ⇒ arms can never collide at the midline | `test_calibration_aligns_forward_and_no_cross` |
@@ -133,6 +139,7 @@ both arms + hands, YamArm 5-vs-6 motor enumeration padding (see
 ## What Is Deliberately NOT Here
 
 - No MuJoCo at runtime (`scripts/check_no_mujoco_runtime.py` enforces it).
-- No startup calibration ritual; no per-user stance fitting (see contracts).
+- No stance/orientation calibration — attitude mapping is fixed-convention
+  (the guided POSITION calibration is the only per-session fit; see contracts).
 - No hand-rolled Jacobian solvers — position/swing are pink QP diff-IK; the only
   analytic step is the exact 1-DoF j6 twist assignment.
