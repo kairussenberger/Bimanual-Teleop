@@ -121,6 +121,34 @@ def test_fit_pose_c_anchor_shift_still_cancels():
     assert xc == pytest.approx(0.04, abs=1e-9) and xa == pytest.approx(0.18, abs=1e-9)
 
 
+def test_fit_absorbs_meter_scale_stream_anchor_mismatch():
+    """THE 2026-06-11 regression, real captured poses: ORBIT's wrist and head
+    streams recenter-anchor INDEPENDENTLY — the wrists measured ~1.35 m above
+    the torso proxy for the whole session. The old ±0.8 m offset clip silently
+    truncated the fitted up-offset (needed −2.19 m) and every runtime target
+    landed ~1.4 m above the chest: arms pinned at the workspace ceiling. The
+    offset must absorb the anchor EXACTLY — pose A maps onto the robot
+    neutral, unclipped."""
+    pa = {"left": np.array([-0.189, 1.492, 0.1353]),
+          "right": np.array([0.196, 1.5033, 0.1543])}
+    pb = {"left": np.array([-0.2541, 1.1824, -0.2473]),
+          "right": np.array([0.2611, 1.1917, -0.2302])}
+    pc = {"left": np.array([-0.0351, 1.3494, -0.1041]),
+          "right": np.array([0.0498, 1.3484, -0.0981])}
+    r = fit_two_pose(pa, pb, ROBOT_NEUTRAL, ROBOT_REST, pose_c=pc)
+    assert r is not None
+    assert r.body_offset[1] < -1.5                       # NOT clipped to −0.8
+    A = {s: np.array(r.meta["pose_a"][s]) for s in SIDES}    # fit-frame pose A
+    # The MEAN of pose A maps onto the robot neutral exactly; per-side
+    # residuals are the operator's own asymmetry (~1 cm here), not anchor.
+    mapped = {s: r.axis_scale * A[s] + r.body_offset for s in SIDES}
+    mean_mapped = np.mean([mapped[s] for s in SIDES], axis=0)
+    mean_neutral = np.mean([ROBOT_NEUTRAL[s] for s in SIDES], axis=0)
+    np.testing.assert_allclose(mean_mapped[1:], mean_neutral[1:], atol=1e-3)
+    for s in SIDES:
+        np.testing.assert_allclose(mapped[s][1:], ROBOT_NEUTRAL[s][1:], atol=0.02)
+
+
 # --------------------------------------------------------------------------- #
 # persistence
 # --------------------------------------------------------------------------- #
@@ -143,8 +171,11 @@ def test_load_rejects_garbage(tmp_path):
     assert load_calibration(p) is None                       # corrupt
     p.write_text(json.dumps({"axis_scale": [9.0, 1.0, 1.0], "body_offset": [0, 0, 0]}))
     assert load_calibration(p) is None                       # out-of-range scale
-    p.write_text(json.dumps({"axis_scale": [1.0, 1.0, 1.0], "body_offset": [0, 0.9, 0]}))
+    p.write_text(json.dumps({"axis_scale": [1.0, 1.0, 1.0], "body_offset": [0, 10.5, 0]}))
     assert load_calibration(p) is None                       # out-of-range offset
+    # a real wrist↔head stream anchor mismatch (measured −2.19 m) must load
+    p.write_text(json.dumps({"axis_scale": [1.0, 1.0, 1.0], "body_offset": [0, -2.19, 0]}))
+    assert load_calibration(p) is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -234,13 +265,14 @@ def _drive(npc: NeutralPoseCalibration, w_left, w_right, t0, t1, hz=30.0):
 
 
 def _drive_two_pose(npc, pa=POSE_A, pb=POSE_B, pc=POSE_C, t0=0.0):
-    t = _drive(npc, pa["left"], pa["right"], t0, t0 + 8.0)
-    if npc.phase != "wait_rest":
-        return t
-    t = _drive(npc, pb["left"], pb["right"], t + 0.1, t + 12.0)
+    # Capture order: rest → clap → extended-forward LAST.
+    t = _drive(npc, pb["left"], pb["right"], t0, t0 + 8.0)
     if npc.phase != "wait_clap":
         return t
-    return _drive(npc, pc["left"], pc["right"], t + 0.1, t + 24.0)
+    t = _drive(npc, pc["left"], pc["right"], t + 0.1, t + 12.0)
+    if npc.phase != "wait_fwd":
+        return t
+    return _drive(npc, pa["left"], pa["right"], t + 0.1, t + 24.0)
 
 
 def test_capture_completes_three_poses():
@@ -259,38 +291,40 @@ def test_capture_with_recentered_anchor_completes():
     delta = np.array([0.1, -0.5, 0.2])
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
-    _drive(npc, POSE_A["left"] + delta, POSE_A["right"] + delta, 0.0, 8.0)
-    assert npc.phase == "wait_rest", "pose A refused under anchor shift"
-    _drive(npc, POSE_B["left"] + delta, POSE_B["right"] + delta, 8.1, 20.0)
-    assert npc.phase == "wait_clap"
-    _drive(npc, POSE_C["left"] + delta, POSE_C["right"] + delta, 20.2, 32.0)
+    _drive(npc, POSE_B["left"] + delta, POSE_B["right"] + delta, 0.0, 8.0)
+    assert npc.phase == "wait_clap", "rest pose refused under anchor shift"
+    _drive(npc, POSE_C["left"] + delta, POSE_C["right"] + delta, 8.1, 20.0)
+    assert npc.phase == "wait_fwd"
+    _drive(npc, POSE_A["left"] + delta, POSE_A["right"] + delta, 20.2, 32.0)
     assert npc.phase == "done" and npc.result is not None
     assert npc.result.lat_center == pytest.approx(0.1, abs=1e-3)
 
 
-def test_capture_pose_b_requires_arm_drop():
-    """Holding pose A twice must not complete — pose B needs the wrists to
-    DROP ≥ DROP_MIN below pose A."""
+def test_capture_pose_fwd_requires_arm_raise():
+    """Holding the rest pose again at step 3/3 must not complete — the
+    extended pose needs the wrists RAISED ≥ DROP_MIN above the rest pose."""
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
-    _drive(npc, POSE_A["left"], POSE_A["right"], 0.0, 8.0)
-    assert npc.phase == "wait_rest"
-    _drive(npc, POSE_A["left"], POSE_A["right"], 8.1, 16.0)
-    assert npc.active and npc.phase == "wait_rest"           # still waiting for the drop
+    _drive(npc, POSE_B["left"], POSE_B["right"], 0.0, 8.0)
+    assert npc.phase == "wait_clap"
+    _drive(npc, POSE_C["left"], POSE_C["right"], 8.1, 20.0)
+    assert npc.phase == "wait_fwd"
+    _drive(npc, POSE_B["left"], POSE_B["right"], 20.2, 28.0)
+    assert npc.active and npc.phase == "wait_fwd"            # still waiting for the raise
 
 
 def test_capture_rejects_crossed_or_narrow_hands():
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
     _drive(npc, [0.02, 0.1, 0.40], [-0.02, 0.1, 0.40], 0.0, 6.0)   # crossed/narrow
-    assert npc.active and npc.phase == "wait_fwd"
+    assert npc.active and npc.phase == "wait_rest"
 
 
 def test_capture_waits_for_both_hands():
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
-    _drive(npc, POSE_A["left"], None, 0.0, 6.0)
-    assert npc.active and npc.phase == "wait_fwd"
+    _drive(npc, POSE_B["left"], None, 0.0, 6.0)
+    assert npc.active and npc.phase == "wait_rest"
     st = npc.status(6.0)
     assert st["left"] and not st["right"]
 
@@ -298,9 +332,9 @@ def test_capture_waits_for_both_hands():
 def test_capture_motion_resets_hold():
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
-    _drive(npc, POSE_A["left"], POSE_A["right"], 0.0, 1.5)
+    _drive(npc, POSE_B["left"], POSE_B["right"], 0.0, 1.5)
     assert npc.active
-    _drive(npc, POSE_A["left"] + [0, 0.08, 0], POSE_A["right"], 1.5 + 1 / 30, 1.8)
+    _drive(npc, POSE_B["left"] + [0, 0.08, 0], POSE_B["right"], 1.5 + 1 / 30, 1.8)
     assert npc._hold_t0 is None
     assert npc.active
 
@@ -316,13 +350,13 @@ def test_capture_timeout_cancels():
 def test_status_prompts_walk_the_operator():
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
-    npc.tick({"left": POSE_A["left"], "right": POSE_A["right"]}, 0.0)
-    assert "1/3" in npc.status(0.0)["msg"] or "EXTEND" in npc.status(0.0)["msg"]
-    t = _drive(npc, POSE_A["left"], POSE_A["right"], 0.0, 8.0)
-    assert npc.phase == "wait_rest"
-    assert "2/3" in npc.status(t)["msg"]
-    t = _drive(npc, POSE_B["left"], POSE_B["right"], t + 0.1, t + 12.0)
+    npc.tick({"left": POSE_B["left"], "right": POSE_B["right"]}, 0.0)
+    assert "1/3" in npc.status(0.0)["msg"] or "RELAX" in npc.status(0.0)["msg"]
+    t = _drive(npc, POSE_B["left"], POSE_B["right"], 0.0, 8.0)
     assert npc.phase == "wait_clap"
+    assert "2/3" in npc.status(t)["msg"]
+    t = _drive(npc, POSE_C["left"], POSE_C["right"], t + 0.1, t + 12.0)
+    assert npc.phase == "wait_fwd"
     assert "3/3" in npc.status(t)["msg"]
 
 
@@ -372,7 +406,7 @@ def test_engine_capture_freezes_arms_applies_and_persists(tmp_path):
     t, dt = 0.0, 1.0 / 30.0
     while t < 30.0:
         ph = eng.neutral.phase
-        w = wa if (ph in ("wait_fwd", "hold") or t < 0.1) else (wb if ph == "wait_rest" else wc)
+        w = wb if (ph == "wait_rest" or t < 0.1) else (wc if ph == "wait_clap" else wa)
         eng.tick(_frame_with_wrist_body(w, t), {"left": True, "right": True}, t)
         if eng.calib_summary is not None:
             break
@@ -390,6 +424,27 @@ def test_engine_capture_freezes_arms_applies_and_persists(tmp_path):
         t += dt
         eng.tick(_frame_with_wrist_body(wb, t), {"left": True, "right": True}, t)
     assert eng.calib_status is None
+
+
+def test_engine_yaw_latch_skips_degenerate_head_samples():
+    """A NaN warm-up or looking-straight-down head must NOT latch the session
+    yaw frame — a degenerate latch poisons every body-relative sample after it
+    (a real replay's first head sample is NaN; a real session's first sample
+    can be the operator looking down at the desk). Until a sane head arrives
+    the engine fails closed: samples come back untracked."""
+    eng = TeleopEngine(load_rig(), DummySink())
+    assert not TeleopEngine._head_latchable(np.full((4, 4), np.nan))
+    down = np.eye(4)        # camera −Z pointing straight down → no horizontal fwd
+    down[:3, :3] = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=float).T
+    assert not TeleopEngine._head_latchable(down)
+    hs = HandSample(tracked=True, wrist=np.eye(4), landmarks=None, pinch=0.0)
+    out = eng._arm_hand_sample(hs, VRFrame(stamp=0.0, head=down,
+                                           hands={"left": hs, "right": hs}))
+    assert out is not None and not out.tracked           # fail closed, no latch
+    assert eng._yaw_R is None
+    out = eng._arm_hand_sample(hs, VRFrame(stamp=0.1, head=np.eye(4),
+                                           hands={"left": hs, "right": hs}))
+    assert eng._yaw_R is not None and out.tracked        # sane head latches
 
 
 def test_engine_calibration_required_locks_live_transports(tmp_path):

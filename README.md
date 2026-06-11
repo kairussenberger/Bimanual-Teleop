@@ -188,17 +188,18 @@ tracking over USB.
 
 3. Put the headset ON and **set both controllers down** — Quest hand tracking
    only streams with controllers asleep.
-4. **No calibration is required.** As soon as a hand is tracked and the clutch
-   is engaged, the robot's hand **glides** (≈1 s, never snaps) onto yours and
-   follows absolutely from then on.
-5. **Optional: fit the mapping to YOUR proportions** — press **⊕ CALIBRATE** on
-   the dashboard, extend both arms straight forward at shoulder height, and hold
-   still ~2.5 s (the banner walks you through it). This fits a POSITION-only
-   scale/offset (your hand spacing → robot hand spacing, your reach → robot
-   reach); it persists per machine (`config/operator_calib.json`, auto-loads on
-   the next live session) and `clear cal` returns to the raw 1:1 map.
-   Orientation is never calibrated. The arms freeze during the capture and glide
-   onto the new correspondence afterwards.
+4. **Calibrate to enable the arms** (live sessions require an in-session fit —
+   a fresh ORBIT recenter anchor invalidates any previous one): press
+   **⊕ CALIBRATE** on the dashboard and follow the banner through three held
+   poses (~2.5 s each): **1) relax both arms down at your sides, 2) press your
+   palms together in front of your chest, 3) extend both arms straight forward
+   at shoulder height.** The extended pose is LAST on purpose — it maps onto
+   the robot's neutral, so when the fit completes the arms engage and **glide**
+   (≈1 s, never snaps) onto the correspondence you are already holding.
+5. The fit is POSITION-only (your hand spacing → robot hand spacing, your reach
+   → robot reach, your clap → the robot's hands touching); it persists per
+   machine (`config/operator_calib.json`) and `clear cal` discards it.
+   Orientation is never calibrated. The arms freeze during the capture.
 6. Clutch options: `--clutch gesture` (pinch to engage — the deadman; release =
    stop immediately) or `--clutch always` (for tests).
 7. **Always record** — recordings make every later debugging session

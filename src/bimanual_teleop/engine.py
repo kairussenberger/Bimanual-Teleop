@@ -238,8 +238,8 @@ class TeleopEngine:
             self._req_calib = False
             if not self.neutral.active:
                 self.neutral.start(t)
-                print("[calib] neutral-pose capture started — extend both arms forward "
-                      "and hold still", flush=True)
+                print("[calib] neutral-pose capture started — relax both arms down "
+                      "at your sides and hold still", flush=True)
 
     def _neutral_tick(self, frame: VRFrame | None, t: float) -> None:
         """One capture tick: arms FREEZE at their current pose, fingers keep
@@ -295,11 +295,27 @@ class TeleopEngine:
             return hs
         head = frame.head if frame else None
         if head is not None and self._yaw_lock:
-            if self._yaw_R is None:
+            if self._yaw_R is None and self._head_latchable(head):
                 self._yaw_R = self._yaw_only_R(head_op_axes(head))
-            head = np.asarray(head, dtype=float).copy()
-            head[:3, :3] = self._yaw_R
+            if self._yaw_R is None:
+                head = None        # no sane yaw frame yet → fail closed (untracked),
+            else:                  # never let raw head yaw drive the arms
+                head = np.asarray(head, dtype=float).copy()
+                head[:3, :3] = self._yaw_R
         return body_relative_hand_sample(hs, head, self.torso_from_head)
+
+    @staticmethod
+    def _head_latchable(head) -> bool:
+        """A head sample is fit to LATCH the session yaw frame only when it is
+        finite and its view direction has a real horizontal component — the
+        first samples of a session (headset still being put on, NaN warm-up,
+        looking straight down at the desk) would otherwise latch a degenerate
+        or reflected frame and poison every body-relative sample after it."""
+        H = np.asarray(head, dtype=float)
+        if H.shape != (4, 4) or not np.all(np.isfinite(H)):
+            return False
+        fwd = -H[:3, 2]
+        return float(np.hypot(fwd[0], fwd[2])) > 0.2
 
     @staticmethod
     def _yaw_only_R(op_axes: np.ndarray) -> np.ndarray:

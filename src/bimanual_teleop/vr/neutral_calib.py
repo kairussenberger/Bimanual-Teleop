@@ -11,14 +11,19 @@ the robot's chest→wrist vector. Two things break a naive fit of that map:
      refuses or fits garbage). There is no in-data absolute reference: the hand
      keypoints share the same anchor as the wrist stream.
 
-The guided THREE-POSE capture solves both at once:
+The guided THREE-POSE capture solves both at once (captured rest → clap →
+extended-forward; the fit itself is order-free, A/B/C below name the ROLES):
 
-    pose A — extend both arms straight forward at shoulder height, hold ~2.5 s
-    pose B — relax both arms down at your sides, hold ~2.5 s
-    pose C — press your palms together in front of your chest, hold ~2.5 s
+    pose 1 (B) — relax both arms down at your sides, hold ~2.5 s
+    pose 2 (C) — press your palms together in front of your chest, hold ~2.5 s
              (anchors the LATERAL map at contact width: YOUR clap maps to the
              ROBOT's hands touching, by construction, and your true midline
              is measured where your palms meet)
+    pose 3 (A) — extend both arms straight forward at shoulder height, hold ~2.5 s
+             (LAST on purpose: pose A maps onto the robot's neutral by
+             construction, so the fit completes while you are ALREADY HOLDING
+             that correspondence — the arms engage and glide to the natural
+             forward neutral, instead of engaging mid-clap at the chest)
 
 Everything the fit needs comes out anchor-proof and head-yaw-proof:
   - the operator's FORWARD direction = the horizontal direction of the A−B
@@ -54,13 +59,21 @@ WINDOW_S = 0.6        # rolling stillness window
 STILL_TOL = 0.030     # m — std-norm of wrist_body over the window
 SPREAD_MIN = 0.20     # m — pose-A lateral wrist spread (right − left), anchor-proof
 SPREAD_MAX = 0.80
-DROP_MIN = 0.22       # m — pose-B wrists must sit at least this far BELOW pose A
+DROP_MIN = 0.22       # m — pose-A wrists must sit at least this far ABOVE pose B
 DELTA_MIN = 0.15      # m — horizontal A−B midpoint delta needed to define forward
 CLAP_SPREAD_MAX = 0.18  # m — pose-C wrists must be close together (palms pressed)
-RAISE_MIN = 0.15      # m — pose-C wrists must come back UP from pose B
-TIMEOUT_S = 180.0     # both poses
+RAISE_MIN = 0.15      # m — pose-C wrists must come UP from pose B
+TIMEOUT_S = 180.0     # all poses
 SCALE_MIN, SCALE_MAX = 0.6, 2.0
-OFFSET_MAX = 0.80     # m — must cover anatomy AND the recenter-anchor shift
+# LOAD-time corruption screen ONLY. The offset must absorb anatomy AND the
+# wrist↔head stream ANCHOR MISMATCH, which is unbounded in practice: ORBIT's
+# wrist and head streams recenter-anchor INDEPENDENTLY (measured 1.35 m apart
+# vertically on a real 2026-06-11 session, larger in offline reconstructions).
+# NEVER clip or bound the FITTED offset — a clipped offset is self-inconsistent
+# and parks the arms at the workspace ceiling (the 2026-06-11 regression: the
+# old ±0.8 m clip turned a correct −2.19 m up-offset into −0.8 and every
+# runtime target landed ~1.4 m above the chest).
+OFFSET_MAX = 10.0     # m
 
 # Robot-side references (body coords [right, up, forward] relative to the chest
 # anchor) used when the rig does not provide them. Probed with the real IK.
@@ -225,7 +238,11 @@ def fit_two_pose(pose_a: dict[str, np.ndarray], pose_b: dict[str, np.ndarray],
                 lat_knots = [[x_c, y_c], [x_a, y_a]]
     ps = max(pos_scale, 1e-6)
     off = np.mean([rbN[s] / ps - scale * A[s] for s in SIDES], axis=0)
-    off = np.clip(off, -OFFSET_MAX, OFFSET_MAX)
+    # The offset IS the anchor absorber — it must map pose A onto the robot
+    # neutral EXACTLY, whatever the stream anchors did (see OFFSET_MAX note).
+    # Finite is the only requirement; the capture gates already vet the poses.
+    if not np.all(np.isfinite(off)):
+        return None
     off[0] = 0.0                                          # lateral handled by lat_center
     meta = {"stamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "pose_a": {s: [round(float(v), 4) for v in A[s]] for s in SIDES},
@@ -241,8 +258,10 @@ def fit_two_pose(pose_a: dict[str, np.ndarray], pose_b: dict[str, np.ndarray],
 
 
 class NeutralPoseCalibration:
-    """The guided two-pose capture: A (arms extended forward) then B (arms
-    relaxed at the sides), each held still HOLD_S. Drives `status` dicts the
+    """The guided three-pose capture: rest (arms down at the sides) → clap
+    (palms together) → extended-forward LAST, each held still HOLD_S. Ending
+    on the extended pose means the fit completes while the operator already
+    holds the robot's neutral correspondence. Drives `status` dicts the
     dashboard renders as the prompt. Clock-injected and deterministic; the
     engine feeds it body-relative wrist samples each tick."""
 
@@ -259,26 +278,26 @@ class NeutralPoseCalibration:
         self.pos_scale = float(m.get("pos_scale", 1.0))
         self.robot_clap_gap = float(m.get("robot_clap_gap", 0.12))
         self.active = False
-        self.phase = "idle"      # idle | wait_fwd | wait_rest | wait_clap | done | cancelled
+        self.phase = "idle"      # idle | wait_rest | wait_clap | wait_fwd | done | cancelled
         self.result: CalibResult | None = None
         self._t0 = 0.0
         self._hold_t0: float | None = None
         self._buf: dict[str, list[tuple[float, np.ndarray]]] = {s: [] for s in SIDES}
-        self._pose_a: dict[str, np.ndarray] | None = None
         self._pose_b: dict[str, np.ndarray] | None = None
+        self._pose_c: dict[str, np.ndarray] | None = None
         self._msg = ""
         self._seen = {s: False for s in SIDES}
 
     # ---- lifecycle --------------------------------------------------------- #
     def start(self, t: float) -> None:
         self.active = True
-        self.phase = "wait_fwd"
+        self.phase = "wait_rest"
         self.result = None
         self._t0 = t
         self._hold_t0 = None
         self._buf = {s: [] for s in SIDES}
-        self._pose_a = None
         self._pose_b = None
+        self._pose_c = None
         self._msg = ""
 
     def cancel(self, msg: str = "calibration cancelled") -> None:
@@ -325,10 +344,10 @@ class NeutralPoseCalibration:
         return means
 
     def _pose_ready(self, t: float) -> bool:
-        """Anchor-proof gates (nothing trusts an absolute frame): pose A needs a
-        sane lateral SPREAD; pose B needs the wrists DROPPED ≥ DROP_MIN below
-        pose A; pose C (palms together) needs the wrists CLOSE and raised back
-        up from pose B."""
+        """Anchor-proof gates (nothing trusts an absolute frame): pose 1 (rest)
+        needs a sane lateral SPREAD; pose 2 (palms together) needs the wrists
+        CLOSE and raised up from the rest pose; pose 3 (extended forward)
+        needs a sane spread AND the wrists RAISED ≥ DROP_MIN above rest."""
         means = self._still_means(t)
         if means is None:
             return False
@@ -338,10 +357,10 @@ class NeutralPoseCalibration:
             return spread <= CLAP_SPREAD_MAX and raised >= RAISE_MIN
         if not (SPREAD_MIN <= spread <= SPREAD_MAX):
             return False
-        if self.phase in ("wait_fwd", "hold"):
+        if self.phase == "wait_rest":
             return True
-        drop = float(np.mean([self._pose_a[s][1] - means[s][1] for s in SIDES]))
-        return drop >= DROP_MIN
+        raised = float(np.mean([means[s][1] - self._pose_b[s][1] for s in SIDES]))
+        return raised >= DROP_MIN
 
     def _advance(self, t: float) -> None:
         means = {}
@@ -351,20 +370,21 @@ class NeutralPoseCalibration:
                 self._hold_t0 = None
                 return
             means[s] = win.mean(axis=0)
-        if self.phase in ("wait_fwd", "hold"):
-            self._pose_a = means
-            self.phase = "wait_rest"
-            self._hold_t0 = None
-            self._buf = {s: [] for s in SIDES}       # fresh windows for the next pose
-            return
         if self.phase == "wait_rest":
             self._pose_b = means
             self.phase = "wait_clap"
             self._hold_t0 = None
+            self._buf = {s: [] for s in SIDES}       # fresh windows for the next pose
+            return
+        if self.phase == "wait_clap":
+            self._pose_c = means
+            self.phase = "wait_fwd"
+            self._hold_t0 = None
             self._buf = {s: [] for s in SIDES}
             return
-        res = fit_two_pose(self._pose_a, self._pose_b, self.robot_neutral, self.robot_rest,
-                           self.pos_scale, pose_c=means, robot_clap_gap=self.robot_clap_gap)
+        res = fit_two_pose(means, self._pose_b, self.robot_neutral, self.robot_rest,
+                           self.pos_scale, pose_c=self._pose_c,
+                           robot_clap_gap=self.robot_clap_gap)
         if res is None:                               # degenerate capture — keep waiting
             self._hold_t0 = None
             return
@@ -380,7 +400,7 @@ class NeutralPoseCalibration:
     def status(self, t: float) -> dict:
         if self.active and self._hold_t0 is not None:
             elapsed = t - self._hold_t0
-            step = {"wait_fwd": "1/3", "hold": "1/3", "wait_rest": "2/3"}.get(self.phase, "3/3")
+            step = {"wait_rest": "1/3", "wait_clap": "2/3"}.get(self.phase, "3/3")
             return {"active": True, "kind": "neutral", "phase": "hold",
                     "progress": min(1.0, elapsed / HOLD_S),
                     "remaining": max(0.0, HOLD_S - elapsed),
@@ -389,12 +409,12 @@ class NeutralPoseCalibration:
         if self.active:
             if not all(self._seen.values()):
                 msg = "CALIBRATION: wear the headset, controllers down — both hands in view"
-            elif self.phase == "wait_rest":
-                msg = "CALIBRATION 2/3: now RELAX BOTH ARMS DOWN at your sides — and hold"
             elif self.phase == "wait_clap":
-                msg = "CALIBRATION 3/3: PRESS YOUR PALMS TOGETHER in front of your chest — and hold"
+                msg = "CALIBRATION 2/3: PRESS YOUR PALMS TOGETHER in front of your chest — and hold"
+            elif self.phase == "wait_fwd":
+                msg = "CALIBRATION 3/3: EXTEND BOTH ARMS straight forward at shoulder height — and hold"
             else:
-                msg = "CALIBRATION 1/3: EXTEND BOTH ARMS straight forward at shoulder height"
+                msg = "CALIBRATION 1/3: RELAX BOTH ARMS DOWN at your sides — and hold"
             return {"active": True, "kind": "neutral", "phase": self.phase, "progress": 0.0,
                     "remaining": HOLD_S, "left": self._seen["left"],
                     "right": self._seen["right"], "msg": msg}
