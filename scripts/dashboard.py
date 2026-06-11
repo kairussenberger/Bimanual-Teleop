@@ -208,7 +208,11 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  <span id=conn class="chip bad">stream …</span><span id=hz class=chip>— Hz</span>
  <span id=L class="chip bad">LEFT —</span><span id=R class="chip bad">RIGHT —</span>
  <span id=calib class=chip style="display:none"></span>
- <span style="flex:1"></span><span class=chip id=age>age —</span>
+ <span style="flex:1"></span>
+ <button class=chip style="cursor:pointer;border:0" onclick="setView(-0.66,0.24)">view: behind</button>
+ <button class=chip style="cursor:pointer;border:0" onclick="setView(2.48,0.24)">view: front</button>
+ <button class=chip style="cursor:pointer;border:0" onclick="setView(VIEW_DEFAULT.yaw,VIEW_DEFAULT.pitch)">reset view</button>
+ <span class=chip id=age>age —</span>
 </header>
 <main>
  <div>
@@ -232,16 +236,16 @@ const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], dotp=(a,b)=>a[0]*b[0]+a[1]*b[1
 const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
 const nrm=a=>{const n=Math.hypot(a[0],a[1],a[2])||1;return[a[0]/n,a[1]/n,a[2]/n]};
 const LIGHT=nrm([0.4,0.3,0.85]);
-function Scene(canvas,yaw,pitch,scale,ctr){
- const s={cv:canvas,cx:canvas.getContext('2d'),yaw,pitch,scale,ctr,prims:[],drag:null};
+function Scene(canvas,scale,ctr){
+ const s={cv:canvas,cx:canvas.getContext('2d'),scale,ctr,prims:[],drag:null};
  canvas.onmousedown=e=>{s.drag=[e.clientX,e.clientY];canvas.style.cursor='grabbing'};
  window.addEventListener('mouseup',()=>{s.drag=null;canvas.style.cursor='grab'});
- window.addEventListener('mousemove',e=>{if(!s.drag)return;s.yaw-=(e.clientX-s.drag[0])*0.008;
-  s.pitch=Math.max(-1.35,Math.min(1.35,s.pitch+(e.clientY-s.drag[1])*0.006));s.drag=[e.clientX,e.clientY]});
+ window.addEventListener('mousemove',e=>{if(!s.drag)return;VIEW.yaw-=(e.clientX-s.drag[0])*0.008;
+  VIEW.pitch=Math.max(-1.35,Math.min(1.35,VIEW.pitch+(e.clientY-s.drag[1])*0.006));s.drag=[e.clientX,e.clientY]});
  canvas.onwheel=e=>{e.preventDefault();s.scale*=e.deltaY<0?1.1:0.9;s.scale=Math.max(120,Math.min(1200,s.scale))};
  return s;
 }
-function camOf(s){const cy=Math.cos(s.yaw),sy=Math.sin(s.yaw),cp=Math.cos(s.pitch),sp=Math.sin(s.pitch);
+function camOf(s){const cy=Math.cos(VIEW.yaw),sy=Math.sin(VIEW.yaw),cp=Math.cos(VIEW.pitch),sp=Math.sin(VIEW.pitch);
  const fwd=[cp*cy,cp*sy,sp];const right=nrm(cross([0,0,1],fwd));const up=cross(fwd,right);return{right,up,fwd}}
 function P(s,cam,p){const q=sub(p,s.ctr);
  return{x:s.cv.width/2+dotp(q,cam.right)*s.scale,y:s.cv.height/2-dotp(q,cam.up)*s.scale,d:dotp(q,cam.fwd)}}
@@ -264,7 +268,10 @@ function tri(s,cam,p0,p1,p2,base,alpha){
 function flush(s){s.prims.sort((a,b)=>b.d-a.d);for(const p of s.prims)p.f();s.prims=[]}
 function clearCv(s){s.cx.clearRect(0,0,s.cv.width,s.cv.height)}
 function grid(s,cam,z){for(let i=-4;i<=4;i++){seg(s,cam,[-1.1,i*0.25,z],[0.7,i*0.25,z],[32,38,49],1);
- seg(s,cam,[i*0.25-0.2,-1.05,z],[i*0.25-0.2,1.05,z],[32,38,49],1)}}
+ seg(s,cam,[i*0.25-0.2,-1.05,z],[i*0.25-0.2,1.05,z],[32,38,49],1)}
+ seg(s,cam,[-0.55,0,z],[-1.0,0,z],[90,200,140],3);                       // FRONT arrow (-X)
+ {const A=P(s,cam,[-1.06,0,z]);
+  s.prims.push({d:A.d,f(){s.cx.font='bold 12px sans-serif';s.cx.fillStyle='#5ac88c';s.cx.fillText('FRONT',A.x-18,A.y)}});}}
 // ---- data ----
 const FINGERS=[[[0,1,2,3,4],[212,105,158]],[[0,5,6,7,8,9],[74,144,217]],[[0,10,11,12,13,14],[42,161,152]],
  [[0,15,16,17,18,19],[202,165,32]],[[0,20,21,22,23,24],[166,108,201]]];
@@ -273,9 +280,14 @@ const TRIAD=[[224,72,72],[60,190,80],[80,110,250]];
 function quat2cols(q){const[w,x,y,z]=q;return[[1-2*(y*y+z*z),2*(x*y+w*z),2*(x*z-w*y)],
  [2*(x*y-w*z),1-2*(x*x+z*z),2*(y*z+w*x)],[2*(x*z+w*y),2*(y*z-w*x),1-2*(x*x+y*y)]]}
 let MESH=null,RIG=null;
-const scH=Scene($('cvH'),-2.18,0.28,430,[0,0.30,0.12]);   // hands: (right, fwd, up)
-const scR=Scene($('cvR'),-0.66,0.24,300,[-0.1,-0.05,0.82]);
-const scO=Scene($('cvO'),-0.66,0.24,330,[-0.12,-0.05,0.85]);
+const VIEW={yaw:-0.66,pitch:0.24};                 // ONE camera shared by all panels (GIF default)
+const VIEW_DEFAULT={yaw:-0.66,pitch:0.24};
+function setView(yaw,pitch){VIEW.yaw=yaw;VIEW.pitch=pitch;}
+// All panels share VIEW (the GIF camera by default). Hands are drawn in the SAME
+// world axes convention as the robot, so the three panels can never disagree.
+const scH=Scene($('cvH'),430,[-0.28,0,0.10]);
+const scR=Scene($('cvR'),300,[-0.1,-0.05,0.82]);
+const scO=Scene($('cvO'),330,[-0.12,-0.05,0.85]);
 function meshInto(s,cam,T,verts,base,alpha){
  const R=[[T[0],T[1],T[2]],[T[4],T[5],T[6]],[T[8],T[9],T[10]]],t=[T[3],T[7],T[11]];
  const X=v=>[R[0][0]*v[0]+R[0][1]*v[1]+R[0][2]*v[2]+t[0],
@@ -317,9 +329,13 @@ function drawHands(st){
  for(const side of['left','right']){
   const h=st.op&&st.op.hands?st.op.hands[side]:null;
   if(!h||!h.tracked||!h.wrist_body)continue;
-  const w=h.wrist_body,o=[w[0],w[2],w[1]];                                // (r,f,u)
+  const w=h.wrist_body,o=[-w[2],w[0],w[1]];                               // body [r,u,f] -> world [-f,r,u]
   seg(scH,cam,[0,0,0],o,[120,104,40],1.6);
-  if(h.lm_body){const L=[];for(let i=0;i<75;i+=3)L.push([w[0]+h.lm_body[i],w[2]+h.lm_body[i+2],w[1]+h.lm_body[i+1]]);
+  {const A=P(scH,cam,[o[0],o[1],o[2]+0.10]);
+   scH.prims.push({d:A.d-0.01,f(){scH.cx.font='bold 17px sans-serif';
+    scH.cx.fillStyle=side==='left'?'#6f9fe8':'#e8854a';scH.cx.fillText(side==='left'?'L':'R',A.x-5,A.y)}});}
+  if(h.lm_body){const L=[];for(let i=0;i<75;i+=3)
+    L.push([-(w[2]+h.lm_body[i+2]),w[0]+h.lm_body[i],w[1]+h.lm_body[i+1]]);
    for(const[chain,c]of FINGERS){for(let k=1;k<chain.length;k++)seg(scH,cam,L[chain[k-1]],L[chain[k]],c,2.6);
     for(const j of chain)dot(scH,cam,L[j],c,2.2)}}
   else dot(scH,cam,o,GOLD,5);
@@ -331,12 +347,15 @@ function drawOverlay(st,meshT,hm,hT){
  clearCv(scO);const cam=camOf(scO);grid(scO,cam,0);
  const bases=robotInto(scO,cam,st,meshT,0.85,hm,hT);
  if(bases.length===2&&st.op&&st.op.hands){
-  const an=[(bases[0][0]+bases[1][0])/2,(bases[0][1]+bases[1][1])/2,(bases[0][2]+bases[1][2])/2-0.15];
+  const an=[(bases[0][0]+bases[1][0])/2-0.20,(bases[0][1]+bases[1][1])/2,(bases[0][2]+bases[1][2])/2-0.15];  // matches mapping.body_anchor_forward/drop
   dot(scO,cam,an,GOLD,5);
   for(const side of['left','right']){
    const h=st.op.hands[side];if(!h||!h.tracked||!h.wrist_body)continue;
    const w=h.wrist_body,o=handWorld(an,w);
    seg(scO,cam,an,o,[150,128,45],1.6);
+   {const A=P(scO,cam,[o[0],o[1],o[2]+0.12]);
+    scO.prims.push({d:A.d-0.01,f(){scO.cx.font='bold 17px sans-serif';
+     scO.cx.fillStyle=side==='left'?'#6f9fe8':'#e8854a';scO.cx.fillText(side==='left'?'L':'R',A.x-5,A.y)}});}
    if(h.lm_body){const L=[];for(let i=0;i<75;i+=3)
      L.push(handWorld(an,[w[0]+h.lm_body[i],w[1]+h.lm_body[i+1],w[2]+h.lm_body[i+2]]));
     for(const[chain,c]of FINGERS){for(let k=1;k<chain.length;k++)seg(scO,cam,L[chain[k-1]],L[chain[k]],c,2.4);
@@ -361,8 +380,9 @@ function card(side,s){
  const op=s.op&&s.op.hands?s.op.hands[side]:null;
  if(op&&op.wrist_body){const w=op.wrist_body;h+=`<div class=kv><span>your hand (torso→wrist)</span><b>R ${w[0].toFixed(2)} · U ${w[1].toFixed(2)} · F ${w[2].toFixed(2)} m</b></div>`}
  if(a.ee_pos)h+=`<div class=kv><span>EE world [x,y,z]</span><b>${a.ee_pos.map(v=>v.toFixed(2)).join(', ')} m</b></div>`;
- if(a.cmd_pos&&a.ee_pos){const e=Math.hypot(...[0,1,2].map(k=>a.cmd_pos[k]-a.ee_pos[k]));
-  h+=`<div class=kv><span>target gap (cmd−ee)</span><b class="${e<0.06?'err-ok':'err-bad'}">${(e*100).toFixed(1)} cm</b></div>`}
+ const wp=a.wrist_pos||a.ee_pos;
+ if(a.cmd_pos&&wp){const e=Math.hypot(...[0,1,2].map(k=>a.cmd_pos[k]-wp[k]));
+  h+=`<div class=kv><span>wrist target gap</span><b class="${e<0.05?'err-ok':'err-bad'}">${(e*100).toFixed(1)} cm</b></div>`}
  return h}
 function chip(id,cls,txt){const e=$(id);e.className='chip '+cls;e.textContent=txt}
 async function tick(){
