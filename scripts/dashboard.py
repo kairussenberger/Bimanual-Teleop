@@ -214,6 +214,15 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  <button class=chip style="cursor:pointer;border:0" onclick="setView(VIEW_DEFAULT.yaw,VIEW_DEFAULT.pitch)">reset view</button>
  <span class=chip id=age>age —</span>
 </header>
+<div style="display:flex;gap:10px;align-items:center;padding:10px 16px;background:#141925;border-bottom:1px solid #232936;flex-wrap:wrap">
+ <button id=btnLive  style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#1e5d3a;color:#fff">&#9654; START LIVE (Quest)</button>
+ <button id=btnStop  style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#7c2d2d;color:#fff">&#9632; STOP</button>
+ <span style="width:14px"></span>
+ <select id=selRec style="background:#222833;color:#dde3ea;border:1px solid #353c4a;border-radius:8px;padding:7px"></select>
+ <label style="color:#9fb2c8;font-size:13px"><input type=checkbox id=chkLoop checked> loop</label>
+ <button id=btnReplay style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#2b4a7a;color:#fff">&#9654; REPLAY</button>
+ <span id=ctrlStatus style="color:#9fb2c8;font-size:13px;margin-left:8px">…</span>
+</div>
 <main>
  <div>
   <div class=duo>
@@ -385,6 +394,25 @@ function card(side,s){
   h+=`<div class=kv><span>wrist target gap</span><b class="${e<0.05?'err-ok':'err-bad'}">${(e*100).toFixed(1)} cm</b></div>`}
  return h}
 function chip(id,cls,txt){const e=$(id);e.className='chip '+cls;e.textContent=txt}
+async function control(params){try{const r=await fetch('/control?'+new URLSearchParams(params));updCtrl(await r.json())}catch(e){}}
+function updCtrl(c){
+ if(!c)return;
+ const el=$('ctrlStatus');
+ el.textContent = c.running
+   ? `● ${c.mode}${c.record?' — recording '+c.record:''}${c.uptime?'  ('+Math.floor(c.uptime/60)+':'+String(Math.floor(c.uptime%60)).padStart(2,'0')+')':''}`
+   : `○ ${c.msg||'stopped'}`;
+ el.style.color = c.running ? '#41d98d' : '#9fb2c8';
+ const sel=$('selRec');
+ if(c.recordings && sel.options.length !== c.recordings.length){
+  const cur=sel.value; sel.innerHTML='';
+  for(const r of c.recordings){const o=document.createElement('option');o.value=r;o.textContent=r.split('/').pop();sel.appendChild(o)}
+  if(cur)sel.value=cur;
+ }
+}
+$('btnLive').onclick=()=>control({action:'start_live'});
+$('btnStop').onclick=()=>control({action:'stop'});
+$('btnReplay').onclick=()=>{const f=$('selRec').value;if(f)control({action:'start_replay',file:f,loop:$('chkLoop').checked?'1':'0'})};
+let ctrlN=0;
 async function tick(){
  try{
   if(!RIG){try{RIG=await(await fetch('/rig')).json()}catch(e){}}
@@ -403,6 +431,7 @@ async function tick(){
    drawHands(s);drawRobot(s,d.mesh_T,d.hand_mesh,d.hand_T);drawOverlay(s,d.mesh_T,d.hand_mesh,d.hand_T);
    $('cardL').innerHTML=card('left',s);$('cardR').innerHTML=card('right',s);
   }
+  if(++ctrlN%20===1){try{updCtrl(await(await fetch('/control?action=status')).json())}catch(e){}}
  }catch(e){chip('conn','bad','dashboard error')}
  requestAnimationFrame(()=>setTimeout(tick,50));
 }
@@ -427,11 +456,103 @@ def rig_info() -> dict:
                 for side in ("left", "right")}
 
 
+import glob
+import signal
+import subprocess
+import sys as _sys
+from urllib.parse import parse_qs, urlparse
+
 BUILD = time.strftime("%H:%M:%S")    # server start time, shown in the page header
 
 
+class EngineManager:
+    """The dashboard owns the teleop engine process: buttons instead of terminals.
+    Starting anything first kills stray engine processes, so port collisions and
+    zombie sessions cannot happen."""
+
+    def __init__(self):
+        self.proc = None
+        self.mode = None
+        self.record = None
+        self.t0 = None
+        self.last_msg = "stopped"
+        self._lock = threading.Lock()
+
+    def _kill_strays(self):
+        subprocess.run(["pkill", "-INT", "-f", "bimanual_teleop.launch.run_teleop"],
+                       capture_output=True)
+        time.sleep(1.5)
+
+    def _spawn(self, args, mode, record):
+        log = open(REPO_ROOT / "out" / "engine.log", "ab")
+        (REPO_ROOT / "out").mkdir(exist_ok=True)
+        self.proc = subprocess.Popen([_sys.executable, "-m", "bimanual_teleop.launch.run_teleop", *args],
+                                     cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT)
+        self.mode, self.record, self.t0 = mode, record, time.time()
+        self.last_msg = f"{mode} running"
+
+    def start_live(self):
+        with self._lock:
+            self._stop_inner()
+            self._kill_strays()
+            rec = f"recordings/live_{time.strftime('%m%d_%H%M%S')}.npz"
+            self._spawn(["--vr", "orbit", "--clutch", "always", "--record", rec], "LIVE", rec)
+            return self.status()
+
+    def start_replay(self, file: str, loop: bool):
+        with self._lock:
+            self._stop_inner()
+            self._kill_strays()
+            args = ["--vr", "replay", file] + (["--loop"] if loop else [])
+            self._spawn(args, f"REPLAY {Path(file).name}" + (" (loop)" if loop else ""), None)
+            return self.status()
+
+    def _stop_inner(self):
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGINT)
+            try:
+                self.proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        if self.record:
+            self.last_msg = f"stopped — saved {self.record}"
+        elif self.mode:
+            self.last_msg = "stopped"
+        self.proc, self.mode, self.record, self.t0 = None, None, None, None
+
+    def stop(self):
+        with self._lock:
+            self._stop_inner()
+            return self.status()
+
+    def status(self):
+        alive = self.proc is not None and self.proc.poll() is None
+        if self.proc is not None and not alive and self.mode is not None:
+            self.last_msg = f"{self.mode} exited"
+            self.mode, self.record, self.t0 = None, None, None
+        recs = sorted(glob.glob(str(REPO_ROOT / "recordings" / "*.npz")))
+        return {"running": alive, "mode": self.mode, "record": self.record,
+                "uptime": round(time.time() - self.t0, 1) if (alive and self.t0) else None,
+                "msg": self.last_msg,
+                "recordings": [str(Path(r).relative_to(REPO_ROOT)) for r in recs]}
+
+    def dispatch(self, query: dict):
+        action = (query.get("action") or [""])[0]
+        if action == "start_live":
+            return self.start_live()
+        if action == "start_replay":
+            f = (query.get("file") or [""])[0]
+            if not f or not (REPO_ROOT / f).exists():
+                return {"error": f"no such recording: {f}", **self.status()}
+            return self.start_replay(f, (query.get("loop") or ["0"])[0] == "1")
+        if action == "stop":
+            return self.stop()
+        return self.status()
+
+
 def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None,
-                meshes: "MeshAssets | None" = None) -> ThreadingHTTPServer:
+                meshes: "MeshAssets | None" = None,
+                manager: "EngineManager | None" = None) -> ThreadingHTTPServer:
     rig_body = json.dumps(rig or {}).encode()
     mesh_body = json.dumps(meshes.geoms if meshes else {}).encode()
 
@@ -455,6 +576,11 @@ def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None,
                 ctype = "application/json"
             elif self.path.startswith("/rig"):
                 body = rig_body
+                ctype = "application/json"
+            elif self.path.startswith("/control"):
+                q = parse_qs(urlparse(self.path).query)
+                out = manager.dispatch(q) if manager else {"error": "no manager"}
+                body = json.dumps(out).encode()
                 ctype = "application/json"
             else:
                 body = PAGE.replace("__BUILD__", BUILD).encode()
@@ -488,7 +614,8 @@ def main() -> int:
     except Exception as e:
         print(f"[dashboard] mesh view disabled ({e}); falling back to link lines")
         meshes = None
-    srv = make_server(feed, args.host, args.port, rig=rig_info(), meshes=meshes)
+    srv = make_server(feed, args.host, args.port, rig=rig_info(), meshes=meshes,
+                      manager=EngineManager())
     print(f"[dashboard] http://{args.host}:{args.port}  ←  {endpoint}")
     try:
         srv.serve_forever()
