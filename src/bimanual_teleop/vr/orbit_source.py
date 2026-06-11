@@ -32,6 +32,7 @@ index 1 yields exactly the **25** WebXR joints in W3C order, so landmark indices
 from __future__ import annotations
 
 import dataclasses
+import re
 import shutil
 import subprocess
 import threading
@@ -166,6 +167,8 @@ class OrbitVRSource(VRSource):
         self._stop = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        if self.auto_reverse:
+            threading.Thread(target=self._adb_watchdog, daemon=True).start()
         if self.viz_enabled and self._viz_srv is None:
             try:
                 from .orbit_viz import start_viz
@@ -234,6 +237,52 @@ class OrbitVRSource(VRSource):
             except (subprocess.SubprocessError, OSError):
                 pass
         print(f"[orbit] adb reverse set on {ok}/{len(_ALL_PORTS)} ports.", flush=True)
+
+    @staticmethod
+    def _adb_device_state() -> str:
+        """'device' | 'unauthorized' | 'absent' | 'no-adb'."""
+        if not shutil.which("adb"):
+            return "no-adb"
+        try:
+            r = subprocess.run(["adb", "get-state"], capture_output=True, timeout=3, text=True)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+            return "unauthorized" if "unauthorized" in (r.stderr or "") else "absent"
+        except (subprocess.SubprocessError, OSError):
+            return "absent"
+
+    def _adb_watchdog(self) -> None:
+        """Self-heal the Quest link: `adb reverse` forwards silently die when the
+        headset disconnects (cable, sleep, adb server restart) and nothing brings
+        them back — the stream then stays dead until a full engine restart. Poll
+        the device every few seconds and re-assert any missing forwards."""
+        state = "device"                       # start() just ran _adb_reverse()
+        while not self._stop:
+            for _ in range(12):                # 3 s, responsive to stop()
+                if self._stop:
+                    return
+                time.sleep(0.25)
+            new = self._adb_device_state()
+            if new == "no-adb":
+                return
+            if new == "device":
+                try:
+                    r = subprocess.run(["adb", "reverse", "--list"],
+                                       capture_output=True, timeout=3, text=True)
+                    have = {int(a) for a, b in re.findall(r"tcp:(\d+)\s+tcp:(\d+)", r.stdout)
+                            if a == b}
+                except (subprocess.SubprocessError, OSError, ValueError):
+                    have = set()
+                missing = [p for p in _ALL_PORTS if p not in have]
+                if missing:
+                    print(f"[orbit] quest link restored, reverses missing {missing} "
+                          "— re-asserting", flush=True)
+                    self._adb_reverse()
+            elif new != state:
+                hint = " — put the headset ON and tap 'Allow USB debugging'" \
+                    if new == "unauthorized" else " — check the USB cable"
+                print(f"[orbit] quest adb state: {new}{hint}", flush=True)
+            state = new
 
     def _banner(self) -> None:
         print("\n" + "=" * 64

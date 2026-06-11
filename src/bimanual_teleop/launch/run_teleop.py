@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import signal
 import subprocess
 import time
 
@@ -115,6 +116,16 @@ def main() -> int:
              sink.endpoint if sink.zmq_enabled else "disabled",
              sink.json_endpoint if sink.json_enabled else "disabled")
 
+    # Engines are routinely children of background/non-interactive shells, which
+    # inherit SIGINT=SIG_IGN — Python then never installs KeyboardInterrupt, so a
+    # "graceful" stop (dashboard STOP, pkill -INT) silently no-ops until someone
+    # escalates to SIGKILL and the recording is lost. Install our own handlers
+    # unconditionally; SIGTERM gets the same graceful save path.
+    def _request_stop(signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, _request_stop)
+    signal.signal(signal.SIGTERM, _request_stop)
+
     rate = RateMeter()
     recorder = SessionRecorder() if args.record else None
     limiter = RateLimiter(frequency=float(rig["control"]["arm_hz"]), warn=False)
@@ -140,6 +151,10 @@ def main() -> int:
     except KeyboardInterrupt:
         print()
     finally:
+        # FIRST thing in teardown: a second INT/TERM (uv forwarding, impatient
+        # killer) must not abort mid-teardown and lose the recording save.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         src.stop()
         sink.close()
         if recorder is not None:

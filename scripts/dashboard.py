@@ -205,6 +205,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  .err-ok{color:var(--green)} .err-bad{color:#ff8a8a}
 </style></head><body>
 <header><b>bimanual-teleop</b><span class=chip style="background:#2b3550">build __BUILD__</span>
+ <span id=quest class=chip>QUEST …</span>
  <span id=conn class="chip bad">stream …</span><span id=hz class=chip>— Hz</span>
  <span id=L class="chip bad">LEFT —</span><span id=R class="chip bad">RIGHT —</span>
  <span id=calib class=chip style="display:none"></span>
@@ -222,6 +223,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  <label style="color:#9fb2c8;font-size:13px"><input type=checkbox id=chkLoop checked> loop</label>
  <button id=btnReplay style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#2b4a7a;color:#fff">&#9654; REPLAY</button>
  <span id=ctrlStatus style="color:#9fb2c8;font-size:13px;margin-left:8px">…</span>
+ <span id=hint style="color:#e8b339;font-size:13px;font-weight:600;margin-left:8px"></span>
 </div>
 <main>
  <div>
@@ -395,8 +397,10 @@ function card(side,s){
  return h}
 function chip(id,cls,txt){const e=$(id);e.className='chip '+cls;e.textContent=txt}
 async function control(params){try{const r=await fetch('/control?'+new URLSearchParams(params));updCtrl(await r.json())}catch(e){}}
+let CTRL=null;
 function updCtrl(c){
  if(!c)return;
+ CTRL=c;
  const el=$('ctrlStatus');
  el.textContent = c.running
    ? `● ${c.mode}${c.record?' — recording '+c.record:''}${c.uptime?'  ('+Math.floor(c.uptime/60)+':'+String(Math.floor(c.uptime%60)).padStart(2,'0')+')':''}`
@@ -412,16 +416,30 @@ function updCtrl(c){
 $('btnLive').onclick=()=>control({action:'start_live'});
 $('btnStop').onclick=()=>control({action:'stop'});
 $('btnReplay').onclick=()=>{const f=$('selRec').value;if(f)control({action:'start_replay',file:f,loop:$('chkLoop').checked?'1':'0'})};
+function hint(d){
+ // First broken link in the chain wins: USB -> engine -> stream -> tracking.
+ const live=!CTRL||!CTRL.running||(CTRL.mode||'').startsWith('LIVE');
+ if(live&&d.quest==='unauthorized')return"→ put the headset ON and tap 'Allow USB debugging'";
+ if(live&&d.quest==='disconnected')return'→ plug the Quest USB cable in';
+ if(CTRL&&!CTRL.running)return'→ press START LIVE (Quest)';
+ if(!d.connected)return CTRL&&CTRL.running?'→ engine starting…':'';
+ const tr=d.state&&d.state.status&&d.state.status.tracked;
+ if(live&&tr&&!tr.left&&!tr.right)return'→ open the ORBIT app on the Quest, WEAR it, controllers asleep, hands in view';
+ return''}
 let ctrlN=0;
 async function tick(){
  try{
   if(!RIG){try{RIG=await(await fetch('/rig')).json()}catch(e){}}
   if(!MESH){try{MESH=await(await fetch('/meshes')).json();if(!MESH.left)MESH=null}catch(e){}}
   const d=await(await fetch('/state')).json();
+  if(d.quest)chip('quest',d.quest==='device'?'ok':(d.quest==='no-adb'||d.quest==='checking'?'warn':'bad'),
+   d.quest==='device'?'QUEST USB':d.quest==='unauthorized'?'QUEST UNAUTHORIZED':
+   d.quest==='no-adb'?'adb missing':d.quest==='checking'?'QUEST …':'QUEST DISCONNECTED');
   chip('conn',d.connected?'ok':'bad',d.connected?'stream connected':'STREAM OFFLINE');
   chip('age',d.age!=null&&d.age<0.3?'ok':'warn','age '+(d.age==null?'—':d.age.toFixed(2)+'s'));
+  $('hint').textContent=hint(d);
   const s=d.state;
-  if(s&&d.connected){
+  if(s&&s.status&&d.connected){
    chip('hz',s.status.hz>30?'ok':'warn',(s.status.hz||0).toFixed(0)+' Hz');
    for(const[side,id]of[['left','L'],['right','R']]){
     const tr=s.status.tracked[side],en=s.status.engaged[side];
@@ -653,9 +671,40 @@ class EngineManager:
         return self.status()
 
 
+class QuestMonitor:
+    """Background `adb get-state` poller so the page can show the Quest USB link
+    (device / unauthorized / disconnected / no-adb) independent of the engine."""
+
+    def __init__(self):
+        self.state = "checking"
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        import shutil
+        while True:
+            if not shutil.which("adb"):
+                self.state = "no-adb"
+            else:
+                try:
+                    r = subprocess.run(["adb", "get-state"], capture_output=True,
+                                       timeout=3, text=True)
+                    if r.returncode == 0 and r.stdout.strip():
+                        self.state = r.stdout.strip()                 # "device"
+                    else:
+                        self.state = ("unauthorized" if "unauthorized" in (r.stderr or "")
+                                      else "disconnected")
+                except (subprocess.SubprocessError, OSError):
+                    self.state = "disconnected"
+            time.sleep(3.0)
+
+
 def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None,
                 meshes: "MeshAssets | None" = None,
-                manager: "EngineManager | None" = None) -> ThreadingHTTPServer:
+                manager: "EngineManager | None" = None,
+                quest: "QuestMonitor | None" = None) -> ThreadingHTTPServer:
     rig_body = json.dumps(rig or {}).encode()
     mesh_body = json.dumps(meshes.geoms if meshes else {}).encode()
 
@@ -663,6 +712,7 @@ def make_server(feed: StateFeed, host: str, port: int, rig: dict | None = None,
         def do_GET(self):                                  # noqa: N802 (stdlib API)
             if self.path.startswith("/state"):
                 snap = feed.snapshot()
+                snap["quest"] = quest.state if quest else None
                 if meshes is not None and snap.get("state"):
                     try:
                         snap["mesh_T"] = meshes.transforms(snap["state"].get("arms", {}))
@@ -717,8 +767,10 @@ def main() -> int:
     except Exception as e:
         print(f"[dashboard] mesh view disabled ({e}); falling back to link lines")
         meshes = None
+    quest = QuestMonitor()
+    quest.start()
     srv = make_server(feed, args.host, args.port, rig=rig_info(), meshes=meshes,
-                      manager=EngineManager())
+                      manager=EngineManager(), quest=quest)
     print(f"[dashboard] http://{args.host}:{args.port}  ←  {endpoint}")
     try:
         srv.serve_forever()
