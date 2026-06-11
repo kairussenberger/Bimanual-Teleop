@@ -33,10 +33,11 @@ ROBOT_REST = {"left": np.array([-0.221, -0.437, -0.032]),
               "right": np.array([0.222, -0.440, 0.032])}
 POSE_A = {"left": np.array([-0.18, 0.10, 0.42]), "right": np.array([0.18, 0.10, 0.42])}
 POSE_B = {"left": np.array([-0.16, -0.45, 0.05]), "right": np.array([0.16, -0.45, 0.05])}
+POSE_C = {"left": np.array([-0.04, -0.05, 0.30]), "right": np.array([0.04, -0.05, 0.30])}
 
 
-def _fit(pa=POSE_A, pb=POSE_B):
-    return fit_two_pose(pa, pb, ROBOT_NEUTRAL, ROBOT_REST)
+def _fit(pa=POSE_A, pb=POSE_B, pc=None):
+    return fit_two_pose(pa, pb, ROBOT_NEUTRAL, ROBOT_REST, pose_c=pc)
 
 
 def test_fit_two_pose_scales_from_differences():
@@ -93,6 +94,31 @@ def test_fit_two_pose_rejects_degenerate():
     assert _fit(POSE_A, POSE_A) is None                       # no A-B delta
     bad_spread = {"left": np.array([-0.05, 0.1, 0.42]), "right": np.array([0.05, 0.1, 0.42])}
     assert _fit(bad_spread, POSE_B) is None                   # hands too close in A
+
+
+def test_fit_pose_c_anchors_contact_and_midline():
+    """Pose C (palms together): the measured clap gap maps to the robot contact
+    gap, the midline is measured where the palms meet, and the curve still hits
+    the robot spread at the pose-A spread."""
+    r = _fit(pc=POSE_C)
+    assert r is not None and r.lat_knots is not None
+    (xc, yc), (xa, ya) = r.lat_knots
+    assert xc == pytest.approx(0.04, abs=1e-9)               # operator clap half-gap
+    assert yc == pytest.approx(0.06, abs=1e-9)               # robot contact half-gap
+    assert xa == pytest.approx(0.18, abs=1e-9)
+    assert ya == pytest.approx(0.22, abs=1e-9)
+    assert r.lat_center == pytest.approx(0.0, abs=1e-9)
+    assert r.forward_body is not None
+
+
+def test_fit_pose_c_anchor_shift_still_cancels():
+    delta = np.array([0.12, -0.50, 0.21])
+    r = _fit({s: POSE_A[s] + delta for s in SIDES}, {s: POSE_B[s] + delta for s in SIDES},
+             {s: POSE_C[s] + delta for s in SIDES})
+    assert r is not None and r.lat_knots is not None
+    assert r.lat_center == pytest.approx(delta[0], abs=1e-9)
+    (xc, yc), (xa, ya) = r.lat_knots
+    assert xc == pytest.approx(0.04, abs=1e-9) and xa == pytest.approx(0.18, abs=1e-9)
 
 
 # --------------------------------------------------------------------------- #
@@ -207,31 +233,37 @@ def _drive(npc: NeutralPoseCalibration, w_left, w_right, t0, t1, hz=30.0):
     return t
 
 
-def _drive_two_pose(npc, pa=POSE_A, pb=POSE_B, t0=0.0):
+def _drive_two_pose(npc, pa=POSE_A, pb=POSE_B, pc=POSE_C, t0=0.0):
     t = _drive(npc, pa["left"], pa["right"], t0, t0 + 8.0)
     if npc.phase != "wait_rest":
         return t
-    return _drive(npc, pb["left"], pb["right"], t + 0.1, t + 12.0)
+    t = _drive(npc, pb["left"], pb["right"], t + 0.1, t + 12.0)
+    if npc.phase != "wait_clap":
+        return t
+    return _drive(npc, pc["left"], pc["right"], t + 0.1, t + 24.0)
 
 
-def test_capture_completes_two_poses():
+def test_capture_completes_three_poses():
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
     t_end = _drive_two_pose(npc)
     assert npc.phase == "done" and npc.result is not None
-    assert t_end < 12.0
+    assert t_end < 30.0
     assert npc.result.axis_scale[0] == pytest.approx(0.44 / 0.36, rel=1e-3)
+    assert npc.result.lat_knots is not None
 
 
 def test_capture_with_recentered_anchor_completes():
     """The measured failure: a desk-start shifted everything ~0.5 m and the old
-    absolute pose gate refused forever. The two-pose gates are relative."""
+    absolute pose gate refused forever. The pose gates are relative."""
     delta = np.array([0.1, -0.5, 0.2])
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
     _drive(npc, POSE_A["left"] + delta, POSE_A["right"] + delta, 0.0, 8.0)
     assert npc.phase == "wait_rest", "pose A refused under anchor shift"
     _drive(npc, POSE_B["left"] + delta, POSE_B["right"] + delta, 8.1, 20.0)
+    assert npc.phase == "wait_clap"
+    _drive(npc, POSE_C["left"] + delta, POSE_C["right"] + delta, 20.2, 32.0)
     assert npc.phase == "done" and npc.result is not None
     assert npc.result.lat_center == pytest.approx(0.1, abs=1e-3)
 
@@ -285,10 +317,13 @@ def test_status_prompts_walk_the_operator():
     npc = NeutralPoseCalibration(_rig())
     npc.start(0.0)
     npc.tick({"left": POSE_A["left"], "right": POSE_A["right"]}, 0.0)
-    assert "1/2" in npc.status(0.0)["msg"] or "EXTEND" in npc.status(0.0)["msg"]
-    _drive(npc, POSE_A["left"], POSE_A["right"], 0.0, 8.0)
+    assert "1/3" in npc.status(0.0)["msg"] or "EXTEND" in npc.status(0.0)["msg"]
+    t = _drive(npc, POSE_A["left"], POSE_A["right"], 0.0, 8.0)
     assert npc.phase == "wait_rest"
-    assert "2/2" in npc.status(8.0)["msg"]
+    assert "2/3" in npc.status(t)["msg"]
+    t = _drive(npc, POSE_B["left"], POSE_B["right"], t + 0.1, t + 12.0)
+    assert npc.phase == "wait_clap"
+    assert "3/3" in npc.status(t)["msg"]
 
 
 # --------------------------------------------------------------------------- #
@@ -333,9 +368,11 @@ def test_engine_capture_freezes_arms_applies_and_persists(tmp_path):
     eng.request_calibration()
     wa = {"left": POSE_A["left"].tolist(), "right": POSE_A["right"].tolist()}
     wb = {"left": POSE_B["left"].tolist(), "right": POSE_B["right"].tolist()}
+    wc = {"left": POSE_C["left"].tolist(), "right": POSE_C["right"].tolist()}
     t, dt = 0.0, 1.0 / 30.0
-    while t < 20.0:
-        w = wa if (eng.neutral.phase in ("wait_fwd", "hold") or t < 0.1) else wb
+    while t < 30.0:
+        ph = eng.neutral.phase
+        w = wa if (ph in ("wait_fwd", "hold") or t < 0.1) else (wb if ph == "wait_rest" else wc)
         eng.tick(_frame_with_wrist_body(w, t), {"left": True, "right": True}, t)
         if eng.calib_summary is not None:
             break
@@ -355,7 +392,11 @@ def test_engine_capture_freezes_arms_applies_and_persists(tmp_path):
     assert eng.calib_status is None
 
 
-def test_engine_autoloads_for_live_transport_only(tmp_path):
+def test_engine_calibration_required_locks_live_transports(tmp_path):
+    """SAFETY: with require_calibration (default), a live transport must NOT
+    auto-load an old fit and must NOT follow hands until an in-session
+    calibration completes — a fresh ORBIT recenter anchor invalidates any
+    previous absolute fit."""
     calib_path = tmp_path / "operator_calib.json"
     _fit().save(calib_path)
     rig = load_rig()
@@ -364,13 +405,28 @@ def test_engine_autoloads_for_live_transport_only(tmp_path):
     assert TeleopEngine(rig, DummySink()).calib_summary is None      # gate stays deterministic
     rig["vr"]["transport"] = "orbit"
     eng = TeleopEngine(rig, DummySink())
-    assert eng.calib_summary is not None                             # live session restores fit
-    eng.request_calibration_clear()
-    eng.tick(None, {}, 0.0)
-    assert eng.calib_summary is None
-    assert not calib_path.exists()
+    assert eng.calib_summary is None                                 # no stale auto-load
+    assert eng.follow_locked                                         # arms locked
+    q0 = {s: eng.arm[s].ik.q.copy() for s in SIDES}
+    t = 0.0
+    for _ in range(120):                                             # hands wave; arms must hold
+        t += 1 / 60
+        eng.tick(_frame_with_wrist_body({"left": [-0.2, 0.1 * np.sin(t * 3), 0.4],
+                                         "right": [0.2, 0.1 * np.cos(t * 3), 0.4]}, t),
+                 {"left": True, "right": True}, t)
     for s in SIDES:
-        np.testing.assert_allclose(eng.arm[s].mapper.axis_scale, np.ones(3))
+        assert float(np.linalg.norm(eng.arm[s].ik.q - q0[s])) < 1e-9, "locked arm moved"
+    # legacy opt-out still auto-loads
+    rig2 = load_rig()
+    rig2["mapping"]["calib_file"] = str(calib_path)
+    rig2["vr"]["transport"] = "orbit"
+    rig2["vr"]["require_calibration"] = False
+    eng2 = TeleopEngine(rig2, DummySink())
+    assert eng2.calib_summary is not None and not eng2.follow_locked
+    eng2.request_calibration_clear()
+    eng2.tick(None, {}, 0.0)
+    assert eng2.calib_summary is None
+    assert not calib_path.exists()
 
 
 def test_engine_clap_respects_min_separation():

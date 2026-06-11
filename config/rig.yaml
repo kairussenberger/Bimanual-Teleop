@@ -124,6 +124,11 @@ mapping:
   robot_rest_wrist:
     left:  [-0.221, -0.437, -0.032]
     right: [0.222, -0.440, 0.032]
+  # Pose C of the calibration (palms pressed together in front of the chest)
+  # anchors the LATERAL map at contact width: the operator's measured clap gap
+  # maps to this commanded wrist separation — sized so the capsule guard
+  # (safety.hand_min_separation) leaves the rendered palms just touching.
+  robot_clap_gap: 0.12
   # Where the fitted scale/offset is persisted (per-machine, gitignored — like
   # config/viz_calib.json). Auto-loaded on engine start for LIVE transports only
   # (orbit/vuer); fake/replay stay identity so the acceptance gate and the session
@@ -192,6 +197,19 @@ vr:
   calib_seconds: 0.0  # arm mapping is calibration-free; >0 re-enables the optional legacy startup stillness hold (only steers arms when body_relative is false)
   cross_gap: 0.05     # min world-Y gap each hand keeps from center (anti-overlap guard, metres)
   control_port: 8201  # localhost TCP line-JSON engine commands (dashboard CALIBRATE button)
+  # SAFETY: the operator's body frame yaw. 'locked' (default) = the forward
+  # direction is LATCHED (from the calibration's arm-defined forward; before
+  # that, from the first head sample) — looking left/right or taking the
+  # headset off can NEVER move the arms (head position already cancels in the
+  # body-relative subtraction; this removes head ROTATION too). 'head' = legacy
+  # live head yaw (only sane for true-world sources like Vuer).
+  body_yaw: locked
+  # SAFETY: live transports (orbit/vuer) hold the arms at rest and ignore all
+  # hand input until the operator completes the guided calibration IN THIS
+  # SESSION — a fresh ORBIT recenter anchor makes any previous session's
+  # absolute mapping untrustworthy. fake/replay are exempt (deterministic
+  # tests/analysis). Set false to restore follow-on-startup.
+  require_calibration: true
   # ORBIT streams the head floor-anchored but the wrists in a RECENTER-anchored
   # frame (and a recenter/desk-start moves that anchor arbitrarily — measured
   # +0.5 m once, breaking calibration). 'keypoint' rebuilds each wrist as

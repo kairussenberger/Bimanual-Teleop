@@ -441,6 +441,7 @@ $('btnCalib').onclick=()=>control({action:CAL_ACTIVE?'calibrate_cancel':'calibra
 $('btnCalClear').onclick=()=>control({action:'calibrate_clear'});
 function updCalib(st){
  const c=st&&st.status?st.status.calib:null, applied=st&&st.status?st.status.calib_applied:null;
+ const locked=!!(st&&st.status&&st.status.follow_locked);
  CAL_ACTIVE=!!(c&&c.active);
  const btn=$('btnCalib');
  btn.textContent=CAL_ACTIVE?'✕ CANCEL CAL':'⊕ CALIBRATE';
@@ -452,6 +453,11 @@ function updCalib(st){
   $('calBar').style.width=((c.progress||0)*100).toFixed(0)+'%';
   for(const[side,id]of[['left','calL'],['right','calR']])
    chip(id,c[side]?'ok':'bad',(side==='left'?'LEFT ':'RIGHT ')+(c[side]?'✓ in view':'not tracked'));
+ }else if(locked){
+  bn.style.display='flex';
+  $('calMsg').textContent='ARMS LOCKED — press ⊕ CALIBRATE and follow the 3 poses to enable control (required each session)';
+  $('calBar').style.width='0%';
+  chip('calL','warn','LEFT —');chip('calR','warn','RIGHT —');
  }else bn.style.display='none';
  // header chip: transient msgs (done/cancelled fade engine-side) or the applied fit
  const hc=$('calib');

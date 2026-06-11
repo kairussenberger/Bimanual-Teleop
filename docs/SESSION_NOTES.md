@@ -5,6 +5,65 @@ Each entry: what changed, why, and exactly which files were touched.
 
 ---
 
+## 2026-06-11 (7th pass) — safety: yaw lock + calibration-required, clap as pose 3/3
+
+**User requirements.** (1) Head motion (looking left/right, removing the
+headset) must NEVER produce arm motion — safety-critical. (2) No joint
+commands until calibration completes — force a calibration every session.
+(3) Claps still landed displaced; add the clap to the calibration.
+
+**1. Body-frame YAW LOCK (`vr.body_yaw: locked`, default).** Head POSITION
+already cancels in the body-relative subtraction (the ORBIT reconstruction
+rides the live head), but head ROTATION entered through the head-derived
+body axes: turning the head rotated every wrist target around the chest
+anchor — both a safety hazard and (since the operator watches the dashboard
+mid-clap) a likely contributor to the displaced claps. The yaw frame is now
+LATCHED: from the first head sample at startup, then re-latched to the
+operator's ARM-DEFINED forward when a calibration completes (stored as
+`forward_body` in the fit). Looking around or pulling the headset off is
+now ZERO input by construction; removal also drops hand tracking →
+supervisor HOLD → idle (existing layers). Trade-off (documented): turning
+your whole BODY now moves the frame with you only after recalibrating —
+correct for a stationary operator station, and ORBIT data cannot
+distinguish head from body turns anyway. The dashboard's operator panels
+use the same locked frame (`operator_debug_state(head_R_override=…)`), so
+display == control. `check_body_relative*.py` probes and the pipeline test
+now model the REAL stream semantics (wrist values ride head position, not
+rotation) and pin the zero-input contract.
+
+**2. Calibration REQUIRED per session (`vr.require_calibration: true`).**
+Live transports (orbit/vuer) start with `engine.follow_locked`: arms hold
+rest and ignore all hand input until the in-session capture completes; the
+stale-file auto-load is skipped (a fresh ORBIT recenter anchor invalidates
+any previous absolute fit — measured 0.5 m shifts). The dashboard shows a
+persistent gold banner: "ARMS LOCKED — press ⊕ CALIBRATE…". Clearing the
+calibration re-locks. fake/replay are exempt (deterministic gate/analysis).
+run_hw inherits the same engine behavior → hardware also cannot move
+pre-calibration.
+
+**3. Clap = calibration pose 3/3.** The capture is now extend-forward →
+arms-at-sides → PALMS PRESSED TOGETHER. Pose C anchors the LATERAL map at
+contact width via piecewise-linear knots [[x_clap → robot contact half-gap
+(`mapping.robot_clap_gap`/2)], [x_spread → robot half-spread]]: the
+operator's measured clap maps to the robot's hands touching BY CONSTRUCTION
+(no scale guessing), and the midline (`lat_center`) is measured where the
+palms actually meet — the best possible midline estimate. Gates stay
+relative/anchor-proof (pose C: hands close + raised back up from pose B).
+Calibration file v4 (`lat_knots`, `forward_body`); older files still load
+(legacy quadratic ramp path kept in the mapper).
+
+**Files.** `vr/neutral_calib.py` (pose C, knots, forward_body, prompts
+1/3–3/3), `vr/frames.py` (piecewise lateral curve, lat_knots), `engine.py`
+(yaw latch + re-latch, follow_locked, knots wiring), `render_sink.py`
+(`status.follow_locked`, locked-frame operator display), `scripts/dashboard.py`
+(ARMS LOCKED banner), `config/rig.yaml` (`vr.body_yaw`,
+`vr.require_calibration`, `mapping.robot_clap_gap`),
+`scripts/check_body_relative.py` + `_render.py` (new stream-semantics
+fixtures + zero-input contract), tests updated/extended.
+Gate: **207 tests + probes green.**
+
+---
+
 ## 2026-06-11 (6th pass) — TWO-POSE calibration (recenter-anchor-proof)
 
 **Why.** "The calibrate function did not work": two live sessions

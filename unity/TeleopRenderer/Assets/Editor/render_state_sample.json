@@ -462,6 +462,7 @@
       "left": true,
       "right": true
     },
+    "follow_locked": false,
     "hz": 100.0,
     "tracked": {
       "left": true,

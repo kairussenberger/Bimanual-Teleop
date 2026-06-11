@@ -315,6 +315,7 @@ class ClutchMapper:
         self.body_offset = np.zeros(3)
         self.lat_ref = 0.0
         self.lat_center = 0.0
+        self.lat_knots = None     # [[x_clap, y_contact], [x_spread, y_half_spread]]
         self.anchor_ctrl: SE3 | None = None
         self.anchor_ee: SE3 | None = None
         self._blend_t0: float | None = None
@@ -328,7 +329,7 @@ class ClutchMapper:
         self.release()   # force a fresh anchor on next engage
 
     def set_calibration(self, axis_scale, body_offset, lat_ref: float = 0.0,
-                        lat_center: float = 0.0) -> None:
+                        lat_center: float = 0.0, lat_knots=None) -> None:
         """Install an operator POSITION calibration (body-axes per-axis scale +
         offset; lat_ref enables the non-linear lateral ramp; lat_center = the
         operator's measured midline, mapped onto the robot's midline — absorbs
@@ -339,6 +340,8 @@ class ClutchMapper:
         self.body_offset = np.asarray(body_offset, dtype=float).reshape(3)
         self.lat_ref = max(0.0, float(lat_ref))
         self.lat_center = float(lat_center)
+        self.lat_knots = ([[float(a), float(b)] for a, b in lat_knots]
+                          if lat_knots else None)
         self.release()
 
     @property
@@ -355,6 +358,20 @@ class ClutchMapper:
         quadratic form would fold the map below s ≈ 0.67)."""
         s = float(self.axis_scale[0])
         x = lat - self.lat_center
+        if self.lat_knots is not None:
+            # Piecewise-linear |x|→|out| through (0,0), (x_clap → CONTACT half-gap)
+            # and (x_spread → robot half-spread), extended with the last slope:
+            # the operator's measured clap maps to the robot's hands touching,
+            # their full spread to the robot's full spread — by construction.
+            (xc, yc), (xa, ya) = self.lat_knots
+            ax = abs(x)
+            if ax <= xc:
+                out = ax * (yc / xc)
+            elif ax <= xa:
+                out = yc + (ax - xc) * (ya - yc) / (xa - xc)
+            else:
+                out = ya + (ax - xa) * (ya - yc) / (xa - xc)
+            return float(np.sign(x) * out)
         if self.lat_ref <= 0.0:
             return s * x
         a = min(abs(x) / self.lat_ref, 1.0)
