@@ -87,6 +87,7 @@ class TeleopEngine:
         # between the two capsules (0 disables).
         self.hand_min_sep = float(rig.get("safety", {}).get("hand_min_separation", 0.12))
         self.hand_capsule_len = float(rig.get("safety", {}).get("hand_capsule_len", 0.19))
+        self.cross_gap = float(rig.get("vr", {}).get("cross_gap", 0.05))
 
     def tick(self, frame: VRFrame | None, engaged: dict[str, bool], t: float) -> None:
         self._drain_calib_requests(t)
@@ -144,6 +145,20 @@ class TeleopEngine:
             if mv["right"]:
                 _, cw["right"] = separate_capsules(aw["left"], cw["right"], ad["left"],
                                                    cd["right"], L, d, move_left=False)
+        # Anti-cross as a PAIR-ORDER constraint: the right wrist stays at least
+        # 2·cross_gap to the +Y side OF THE LEFT WRIST. Unlike the old per-side
+        # midline half-spaces (which pinned a hand at ±gap and tore off-center
+        # claps 24 cm apart — measured), the pair may sit anywhere laterally;
+        # only their ORDER and minimum lateral separation are enforced.
+        need = 2.0 * self.cross_gap - (cw["right"][1] - cw["left"][1])
+        if need > 0.0:
+            if mv["left"] and mv["right"]:
+                cw["left"][1] -= need / 2.0
+                cw["right"][1] += need / 2.0
+            elif mv["left"]:
+                cw["left"][1] -= need
+            elif mv["right"]:
+                cw["right"][1] += need
         for s in SIDES:
             if mv[s]:
                 plans[s]["pw"] = cw[s]
@@ -159,7 +174,8 @@ class TeleopEngine:
 
     def _apply_calibration(self, res, announce: str) -> None:
         for s in SIDES:
-            self.arm[s].mapper.set_calibration(res.axis_scale, res.body_offset)
+            self.arm[s].mapper.set_calibration(res.axis_scale, res.body_offset,
+                                               getattr(res, "lat_ref", 0.0))
         self.calib_summary = res.summary()
         print(f"[calib] {announce}: axis_scale={np.round(res.axis_scale, 3).tolist()} "
               f"body_offset={np.round(res.body_offset, 3).tolist()}", flush=True)
@@ -181,7 +197,7 @@ class TeleopEngine:
             if self.neutral.active:
                 self.neutral.cancel("calibration cleared")
             for s in SIDES:
-                self.arm[s].mapper.set_calibration(np.ones(3), np.zeros(3))
+                self.arm[s].mapper.set_calibration(np.ones(3), np.zeros(3), 0.0)
             self.calib_summary = None
             if self._calib_file is not None:
                 try:

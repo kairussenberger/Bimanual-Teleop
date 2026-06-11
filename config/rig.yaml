@@ -84,17 +84,27 @@ mapping:
   # coincide by construction. 'relative' = clutch-latched deltas (then twist_mode
   # below applies).
   orientation_mode: absolute
-  hand_finger_axis: [0.345, -0.363, -0.866]  # hand-local fingers direction (measured: rest phase, palm on desk fingers forward)
-  hand_palm_axis: [-0.496, 0.713, -0.496]    # hand-local back-of-hand normal (same measurement)
+  # Hand-local axes, PER SIDE — the two hands are mirrored anatomically (x flips
+  # sign) and the old single shared constants were measured once on a desk and
+  # sat 21° (fingers) / 45° (palm) off, mis-mapping every commanded attitude
+  # (rolls leaked into j4/j5 swing). Re-measured 2026-06-11 from THREE real
+  # sessions: 14.7k tracked frames, 4-5° scatter, left/right agree as mirrors.
+  hand_finger_axis:                          # hand-local fingers direction
+    left:  [-0.023, -0.225, -0.974]
+    right: [0.024, -0.237, -0.971]
+  hand_palm_axis:                            # hand-local back-of-hand normal
+    left:  [-0.171, 0.961, -0.217]
+    right: [0.175, 0.958, -0.229]
   # Wrist twist (RELATIVE orientation mode only): 'intrinsic' = pronation about
   # YOUR forearm axis is a pure j6 roll about the EE's own tool axis (no j4/j5
   # singularity contortion); 'world' = fully extrinsic (diagnostics).
   twist_mode: intrinsic
-  # Forearm/roll axis in the ORBIT hand frame. Re-measured 2026-06-11 from two
-  # sessions (9.5k fast-rotation samples, both hands agree): the old value
-  # [0, 0.456, 0.890] was ~10° off, which leaked sin(10°) of every unrealized
-  # roll radian into genuine swing demand (the left-arm pivot at the j6 stop).
-  hand_twist_axis: [0.031, 0.311, 0.950]
+  # Forearm/roll axis in the ORBIT hand frame, PER SIDE (mirror pair, like the
+  # finger/palm axes above). Measured from fast-rotation samples across the
+  # same sessions; the old shared [0, 0.456, 0.890] was ~10° off.
+  hand_twist_axis:
+    left:  [0.10, 0.32, 0.94]
+    right: [-0.02, 0.30, 0.95]
   pos_scale: 1.0
   # Operator NEUTRAL-POSE calibration (position-only; orientation is calibration-
   # free by contract). robot_neutral_wrist = where each wrist should sit, in body

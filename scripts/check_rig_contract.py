@@ -73,17 +73,28 @@ def main() -> int:
     require(mapping.get("twist_mode") == "intrinsic",
             "mapping.twist_mode must default to 'intrinsic' — a wrist turn is a pure j6 roll, "
             "never a j4/j5 swing through the wrist singularity ('world' is diagnostics only)")
-    hta = check_vector("mapping.hand_twist_axis", mapping.get("hand_twist_axis"), 3)
-    require(abs(np.linalg.norm(hta) - 1.0) < 0.05, "mapping.hand_twist_axis must be (near) unit length")
     require(mapping.get("orientation_mode") == "absolute",
             "mapping.orientation_mode must default to 'absolute' — the robot hand wears the "
             "operator's hand attitude (overlay skeleton and ORCA hand coincide); 'relative' is "
             "a per-run diagnostic choice")
-    hfa = check_vector("mapping.hand_finger_axis", mapping.get("hand_finger_axis"), 3)
-    hpa = check_vector("mapping.hand_palm_axis", mapping.get("hand_palm_axis"), 3)
-    require(abs(np.linalg.norm(hfa) - 1.0) < 0.05, "mapping.hand_finger_axis must be (near) unit length")
-    require(abs(np.linalg.norm(hpa) - 1.0) < 0.05, "mapping.hand_palm_axis must be (near) unit length")
-    require(abs(float(hfa @ hpa)) < 0.2, "hand finger/palm axes must be roughly orthogonal")
+    # Hand-local axes are PER-SIDE (the two hands are anatomical mirrors; shared
+    # constants were measured 21-45 deg off and leaked rolls into swing).
+    for key in ("hand_twist_axis", "hand_finger_axis", "hand_palm_axis"):
+        v = mapping.get(key)
+        require(isinstance(v, dict) and set(v) >= {"left", "right"},
+                f"mapping.{key} must be per-side ({{left: …, right: …}})")
+        for side in SIDES:
+            a = check_vector(f"mapping.{key}.{side}", v[side], 3)
+            require(abs(np.linalg.norm(a) - 1.0) < 0.05,
+                    f"mapping.{key}.{side} must be (near) unit length")
+    for side in SIDES:
+        hfa = np.asarray(mapping["hand_finger_axis"][side], float)
+        hpa = np.asarray(mapping["hand_palm_axis"][side], float)
+        require(abs(float(hfa @ hpa)) < 0.2,
+                f"hand finger/palm axes must be roughly orthogonal ({side})")
+        # mirror-pair sanity: lateral (x) components flip sign between sides
+    require(np.sign(mapping["hand_palm_axis"]["left"][0]) != np.sign(mapping["hand_palm_axis"]["right"][0]),
+            "hand_palm_axis left/right must be a mirror pair (x flips sign)")
     anchor = mapping.get("body_anchor_world")
     if anchor is not None:
         check_vector("mapping.body_anchor_world", anchor, 3)

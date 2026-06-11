@@ -307,8 +307,13 @@ class ClutchMapper:
         # vr/neutral_calib.py): per-axis scale + offset applied to the ctrl
         # translation before the body→base rotation. Identity by default; only
         # meaningful for body-relative ctrl samples in absolute position mode.
+        # The LATERAL scale is non-linear when lat_ref > 0: ~1:1 near the body
+        # midline (clapped operator hands stay clapped-width on the robot,
+        # instead of being amplified apart), ramping linearly to the full
+        # calibrated scale at the operator's neutral lateral |y| = lat_ref.
         self.axis_scale = np.ones(3)
         self.body_offset = np.zeros(3)
+        self.lat_ref = 0.0
         self.anchor_ctrl: SE3 | None = None
         self.anchor_ee: SE3 | None = None
         self._blend_t0: float | None = None
@@ -321,21 +326,39 @@ class ClutchMapper:
         self.R = np.asarray(R, dtype=float).reshape(3, 3)
         self.release()   # force a fresh anchor on next engage
 
-    def set_calibration(self, axis_scale, body_offset) -> None:
+    def set_calibration(self, axis_scale, body_offset, lat_ref: float = 0.0) -> None:
         """Install an operator neutral-pose POSITION calibration (body-axes
-        per-axis scale + offset). Releases the anchors so the next engage
-        latches a fresh offset and the arm GLIDES onto the new correspondence
-        (the same snap-free path as any re-engage)."""
+        per-axis scale + offset; lat_ref enables the non-linear lateral ramp).
+        Releases the anchors so the next engage latches a fresh offset and the
+        arm GLIDES onto the new correspondence (the same snap-free path as any
+        re-engage)."""
         self.axis_scale = np.asarray(axis_scale, dtype=float).reshape(3)
         self.body_offset = np.asarray(body_offset, dtype=float).reshape(3)
+        self.lat_ref = max(0.0, float(lat_ref))
         self.release()
 
     @property
     def engaged(self) -> bool:
         return self.anchor_ctrl is not None
 
+    def _lat_scaled(self, lat: float) -> float:
+        """Lateral component with the non-linear ramp: s_eff = 1 at the midline
+        → axis_scale[0] at |lat| ≥ lat_ref. QUADRATIC ramp for expanding scales
+        (stays ≈1:1 through clap-width laterals — measured: a linear ramp still
+        amplified a real clap ×1.26); linear ramp for shrinking scales (the
+        quadratic form would fold the map below s ≈ 0.67)."""
+        s = float(self.axis_scale[0])
+        if self.lat_ref <= 0.0:
+            return s * lat
+        a = min(abs(lat) / self.lat_ref, 1.0)
+        ramp = a * a if s >= 1.0 else a
+        return (1.0 + (s - 1.0) * ramp) * lat
+
     def _p_abs(self, ctrl: SE3) -> np.ndarray:
-        w = self.axis_scale * ctrl.translation() + self.body_offset
+        w = ctrl.translation()
+        w = np.array([self._lat_scaled(w[0]),
+                      self.axis_scale[1] * w[1],
+                      self.axis_scale[2] * w[2]]) + self.body_offset
         return self.chest + self.scale * (self.R @ w)
 
     def _R_abs(self, ctrl: SE3) -> np.ndarray:

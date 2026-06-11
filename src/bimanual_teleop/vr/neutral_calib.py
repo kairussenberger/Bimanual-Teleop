@@ -55,23 +55,28 @@ ROBOT_NEUTRAL_DEFAULT = {"left": (-0.22, 0.02, 0.46), "right": (0.22, 0.02, 0.46
 
 @dataclass
 class CalibResult:
-    """A fitted position calibration: body-axes per-axis scale + offset."""
+    """A fitted position calibration: body-axes per-axis scale + offset.
+    `lat_ref` = the operator's neutral lateral |y| — the lateral scale ramps
+    from 1:1 at the midline (claps stay claps) to axis_scale[0] at lat_ref."""
     axis_scale: np.ndarray                  # (3,) [right, up, forward]
     body_offset: np.ndarray                 # (3,) metres, body axes
+    lat_ref: float = 0.0                    # m; 0 = legacy linear lateral scale
     meta: dict = field(default_factory=dict)
 
     def summary(self) -> dict:
         """JSON-safe summary for the render stream / dashboard chip."""
         return {"axis_scale": [round(float(v), 3) for v in self.axis_scale],
                 "body_offset": [round(float(v), 3) for v in self.body_offset],
+                "lat_ref": round(float(self.lat_ref), 3),
                 "stamp": self.meta.get("stamp")}
 
     def save(self, path: str | Path) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": 1,
+        payload = {"version": 2,
                    "axis_scale": [float(v) for v in self.axis_scale],
                    "body_offset": [float(v) for v in self.body_offset],
+                   "lat_ref": float(self.lat_ref),
                    "meta": self.meta}
         p.write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -94,7 +99,17 @@ def load_calibration(path: str | Path) -> CalibResult | None:
         return None
     if np.any(np.abs(off) > OFFSET_MAX + 1e-9):
         return None
-    return CalibResult(axis_scale=scale, body_offset=off, meta=d.get("meta", {}))
+    lat_ref = float(d.get("lat_ref", 0.0))
+    meta = d.get("meta", {})
+    if lat_ref <= 0.0 and isinstance(meta.get("op_neutral"), dict):
+        # version-1 file: derive the ramp reference from the stored neutral
+        try:
+            lat_ref = float(np.mean([abs(meta["op_neutral"][s][0]) for s in SIDES]))
+        except (KeyError, TypeError, IndexError):
+            lat_ref = 0.0
+    if not (0.0 <= lat_ref <= 0.6):
+        lat_ref = 0.0
+    return CalibResult(axis_scale=scale, body_offset=off, lat_ref=lat_ref, meta=meta)
 
 
 def fit_neutral(op_neutral: dict[str, np.ndarray], robot_neutral: dict[str, np.ndarray],
@@ -125,7 +140,8 @@ def fit_neutral(op_neutral: dict[str, np.ndarray], robot_neutral: dict[str, np.n
                            for s in SIDES},
             "robot_neutral": {s: [round(float(v), 4) for v in np.asarray(robot_neutral[s]).reshape(3)]
                               for s in SIDES}}
-    return CalibResult(axis_scale=scale, body_offset=off, meta=meta)
+    lat_ref = float(np.mean([abs(np.asarray(op_neutral[s], dtype=float)[0]) for s in SIDES]))
+    return CalibResult(axis_scale=scale, body_offset=off, lat_ref=lat_ref, meta=meta)
 
 
 class NeutralPoseCalibration:

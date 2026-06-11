@@ -5,6 +5,59 @@ Each entry: what changed, why, and exactly which files were touched.
 
 ---
 
+## 2026-06-11 (5th pass) — per-side hand axes, off-center claps, pair-order anti-cross
+
+**From recordings/live_0611_143958.npz** (clap landed with the hands ~26 cm
+apart and diagonally displaced; left wrist roll still sweeping).
+
+**1. Left-roll sweep — root cause finally found: the shared hand-axis
+constants were 21–45° wrong.** Measured per-side from 14.7k tracked frames
+across three sessions (4–5° scatter): the two hands are clean anatomical
+MIRRORS (x flips sign), and the old shared `hand_finger_axis` /
+`hand_palm_axis` (measured once, palm on a desk) sat 21° / 45° off. The
+hand↔EE convention C built from them mis-mapped every attitude — rolls leaked
+into swing. All three hand-local axes are now PER-SIDE dicts in rig.yaml with
+the measured values (`config.side_axis()` helper reads either form).
+REPLAY RESULT: left q4 range [−1.56,+0.18] → [−0.63,+0.71], zero ticks at
+the soft floor (was pinned for stretches), now symmetric with the right arm
+([−0.95,+0.55]) — "copy exactly what the right arm does" achieved.
+`check_rig_contract` now requires the per-side form + mirror-pair sanity.
+
+**2. Clap displacement — three stacked causes, measured:**
+   - The user clapped LEFT OF CENTER (right hand 2 cm left of the body
+     midline). The old anti-cross guard was per-side HALF-SPACES about the
+     midline: the robot's right hand was pinned at +5 cm and could never
+     follow — 24 of the 26 cm gap. REPLACED with a PAIR-ORDER constraint in
+     the engine's separation step: the right wrist stays ≥ 2·cross_gap to +Y
+     OF THE LEFT WRIST — the pair may sit anywhere laterally (off-center
+     claps are legal); only their order and minimum lateral gap are enforced.
+   - The calibration's lateral scale (×1.6) amplified absolute lateral
+     positions — clapped hands (±4–9 cm) were stretched apart. The lateral
+     scale is now NON-LINEAR: ≈1:1 near the midline, quadratic ramp to the
+     full calibrated scale at the operator's neutral width (`lat_ref`, stored
+     in the calibration file v2; v1 files derive it from their meta — no
+     recalibration needed).
+   - The capsule guard provides the final contact floor.
+   REPLAY RESULT: closest commanded wrist gap 26.6 → **16.3 cm**, almost
+   purely lateral (vertical offset 2.0 cm — the diagonal displacement from
+   the screenshot is gone).
+
+**3. Cleanups.** Shaper seed clipped to the soft limits (pink warned about
+1e-6 overspill); body-motion-invariance test fixture had BOTH hands at the
+same pose (degenerate — the guards pushed coincident targets around), now
+mirrored; the legacy no-cross test asserts the new pair semantics.
+
+**Files.** `config/rig.yaml` (per-side hand axes — measured values),
+`src/bimanual_teleop/config.py` (`side_axis`), `arms/arm_control.py`
+(per-side axes, half-space clamp removed, seed clipping),
+`engine.py` (pair-order anti-cross in `_separate_hands`), `vr/frames.py`
+(non-linear `_lat_scaled`, `lat_ref`), `vr/neutral_calib.py` (lat_ref in
+fit/persist/load-with-derivation), `scripts/analyze_session.py` +
+`scripts/check_rig_contract.py` (per-side schema), tests updated.
+Gate: **199 tests + probes green.**
+
+---
+
 ## 2026-06-11 (4th pass) — mirrored dashboard fix, left-roll taming, attitude smoothing
 
 **From recordings/live_0611_133349.npz** (user: right-arm roll fixed, left

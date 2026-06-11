@@ -86,7 +86,9 @@ def main() -> int:
     arm = engine.arm[side]
     twist_mode = str(rig.get("mapping", {}).get("twist_mode", "intrinsic"))
     ori_mode = str(rig.get("mapping", {}).get("orientation_mode", "absolute"))
-    hand_axis = np.asarray(rig.get("mapping", {}).get("hand_twist_axis", [0.0, 0.456, 0.890]), float)
+    from bimanual_teleop.config import side_axis
+    hand_axis = np.asarray(side_axis(rig.get("mapping", {}), "hand_twist_axis", side,
+                                     [0.0, 0.456, 0.890]), float)
     hand_axis = hand_axis / np.linalg.norm(hand_axis)
 
     # Anchor snapshot, re-captured whenever the mapper (re-)engages.

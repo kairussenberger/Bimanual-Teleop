@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..config import side_axis
 from ..filters import OneEuroFilter
 from ..safety.shaper import JointCommandShaper
 from ..vr.calibrate import R_base_from_body
@@ -72,9 +73,11 @@ class ArmController:
             # Hand↔EE convention, derived (no calibration): the EE basis comes from
             # the frozen rest contract (fingers along approach, palm inward); the
             # hand basis from measured hand-local finger/palm-back axes.
-            f = np.asarray(m.get("hand_finger_axis", [0.345, -0.363, -0.866]), dtype=float)
+            f = np.asarray(side_axis(m, "hand_finger_axis", side,
+                                     [0.345, -0.363, -0.866]), dtype=float)
             f = f / np.linalg.norm(f)
-            p = np.asarray(m.get("hand_palm_axis", [-0.496, 0.713, -0.496]), dtype=float)
+            p = np.asarray(side_axis(m, "hand_palm_axis", side,
+                                     [-0.496, 0.713, -0.496]), dtype=float)
             p = p - (p @ f) * f
             p = p / np.linalg.norm(p)
             H = np.column_stack([np.cross(p, f), p, f])                # hand-local [lat|palm-back|fingers]
@@ -83,15 +86,15 @@ class ArmController:
                                    chest_base=chest_base if mode == "absolute" else None,
                                    engage_blend_s=float(m.get("engage_blend_s", 1.0)),
                                    twist_mode=twist_mode,
-                                   hand_twist_axis=m.get("hand_twist_axis", [0.0, 0.456, 0.890])
+                                   hand_twist_axis=side_axis(m, "hand_twist_axis", side,
+                                                             [0.0, 0.456, 0.890])
                                    if twist_mode == "intrinsic" else None,
                                    ee_tool_axis=self.ik.ee_tool_axis_local
                                    if twist_mode == "intrinsic" else None,
                                    orientation_mode=ori_mode, hand_ee_convention=C)
-        # Anti-cross guard: keep this hand on its own side of the world Y axis so
-        # the two arms can never overlap. left stays y ≤ -gap, right stays y ≥ +gap.
-        gap = float(rig.get("vr", {}).get("cross_gap", 0.05))
-        self.y_bound = -gap if side == "left" else gap
+        # Anti-cross is now a PAIR constraint enforced by the engine alongside the
+        # capsule separation (right hand stays ≥ 2·cross_gap right OF THE LEFT
+        # HAND — not of the body midline, so off-center claps work anywhere).
         ws = rig["safety"]["workspace"]
         self.ws_min = np.asarray(ws["min"], dtype=float)
         self.ws_max = np.asarray(ws["max"], dtype=float)
@@ -273,7 +276,6 @@ class ArmController:
         sm = self.pos_filt({"x": p[0], "y": p[1], "z": p[2]}, t)     # One-Euro
         pb = np.array([sm["x"], sm["y"], sm["z"]])                   # target in base frame
         pw = self.base_R @ pb + self.base_pos                        # → world
-        pw[1] = min(pw[1], self.y_bound) if self.side == "left" else max(pw[1], self.y_bound)
         R_w = self.base_R @ target.rotation().as_matrix()            # attitude, world frame
         governed = self._govern(pw, R_w, t)
         if governed is None:                                         # teleport rejected
@@ -297,7 +299,7 @@ class ArmController:
             self.cmd_pos = None
             self.cmd_R = None
             q = self.shaper.shape(self.ik.q, t)
-            self.ik.seed(q)
+            self.ik.seed(np.clip(q, self.ik.soft_lo, self.ik.soft_hi))
             return q
         pb = self.base_R.T @ (plan["pw"] - self.base_pos)            # world → base
         target = SE3.from_rotation_and_translation(plan["R"], pb)
@@ -305,7 +307,9 @@ class ArmController:
         self.cmd_R = target.rotation().as_matrix()   # commanded orientation (base frame), for viz
         q_raw = self.ik.solve(target, iters=self.iters)   # two-stage: position(j1-3) then orientation(j4-6)
         q = self.shaper.shape(q_raw, t)
-        self.ik.seed(q)
+        # seed clipped to the SOFT limits: the shaper clamps to the hardstops,
+        # so integration eps can sit 1e-6 outside soft and spam pink warnings
+        self.ik.seed(np.clip(q, self.ik.soft_lo, self.ik.soft_hi))
         return q
 
     def update(self, hand: HandSample | None, engaged: bool, t: float) -> np.ndarray:

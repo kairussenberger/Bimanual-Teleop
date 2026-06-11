@@ -418,8 +418,13 @@ def test_engine_body_motion_does_not_drive_arm_but_hand_lift_does():
     def frame(head, torso_to_wrist):
         op = head_op_axes(head)
         torso = np.array([0.0, -0.35, 0.0])
-        wrist = pose(head[:3, :3], head[:3, 3] + op @ (torso + torso_to_wrist))  # rigid + proper
-        hands = {s: HandSample(tracked=True, wrist=wrist.copy(), landmarks=synthetic_webxr_hand(0.0)) for s in SIDES}
+        hands = {}
+        for s in SIDES:
+            ttw = np.asarray(torso_to_wrist, dtype=float).copy()
+            if s == "right":
+                ttw[0] = -ttw[0]   # mirrored: hands APART so no pair/capsule guard binds
+            wrist = pose(head[:3, :3], head[:3, 3] + op @ (torso + ttw))  # rigid + proper
+            hands[s] = HandSample(tracked=True, wrist=wrist.copy(), landmarks=synthetic_webxr_hand(0.0))
         return VRFrame(stamp=0.0, head=head, hands=hands)
 
     rig = load_rig()
@@ -757,14 +762,31 @@ def test_calibration_aligns_forward_and_no_cross():
             t += 1 / 120                # toward forward first, so it needs more ticks
             ac.update(HandSample(tracked=True, wrist=wm([0, 0, -0.25]), landmarks=lm), True, t)
         assert wp()[0] < x0 - 0.02      # forward = −X
-        # shove toward center; must stay on own side
-        ac.ik.reset(); t = 0.0
-        ac.update(HandSample(tracked=True, wrist=wm([0, 0, 0]), landmarks=lm), True, t)
-        for _ in range(80):
-            t += 1 / 120
-            ac.update(HandSample(tracked=True, wrist=wm([-sign * 0.5, 0, 0]), landmarks=lm), True, t)
-        y = wp()[1]
-        assert (y <= 0.001) if side == "left" else (y >= -0.001)
+    # shove the hands ACROSS each other; the engine's pair-order guard must keep
+    # the right wrist ≥ 2*cross_gap to +Y of the left (the pair may sit anywhere
+    # laterally — off-center claps are legal — but the hands can never cross)
+    from bimanual_teleop.engine import TeleopEngine
+    from bimanual_teleop.vr.frames import VRFrame
+
+    class _Sink:
+        def set_arm(self, *a):
+            pass
+
+        def set_hand(self, *a):
+            pass
+
+    eng = TeleopEngine(rig, _Sink())
+    for s, sign in (("left", -1), ("right", +1)):
+        eng.arm[s].mapper.set_R(calibrate_R(lm, rig["arms"][s]["base_quat"]))
+    t = 0.0
+    for _ in range(200):
+        t += 1 / 120
+        hands = {s: HandSample(tracked=True, wrist=wm([-sg * 0.5, 0, 0]), landmarks=lm)
+                 for s, sg in (("left", -1), ("right", +1))}   # crossed demands
+        eng.tick(VRFrame(stamp=t, head=None, hands=hands), {"left": True, "right": True}, t)
+    gap_y = eng.arm["right"].wrist_world()[1] - eng.arm["left"].wrist_world()[1]
+    min_gap = 2 * float(rig["vr"]["cross_gap"])
+    assert gap_y >= min_gap - 0.02, f"hands crossed: pair Y gap {gap_y:.3f} < {min_gap}"
 
 
 def test_end_to_end_render_tick():

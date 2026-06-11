@@ -268,7 +268,7 @@ def test_intrinsic_twist_pure_pronation_is_pure_ee_tool_roll():
     from bimanual_teleop.vr.calibrate import R_base_from_body, body_relative_hand_sample
 
     rig = load_rig()
-    h_local = np.array(rig["mapping"]["hand_twist_axis"], dtype=float)
+    h_local = np.array(rig["mapping"]["hand_twist_axis"]["right"], dtype=float)
     h_local /= np.linalg.norm(h_local)
     head = np.eye(4)
     head[:3, 3] = [0.0, 1.6, 0.0]
@@ -316,7 +316,7 @@ def test_intrinsic_twist_equals_world_mapping_when_axes_align():
         return _axis_angle_R(v, np.arctan2(np.linalg.norm(v), c))
 
     rig = load_rig()
-    h_local = np.array(rig["mapping"]["hand_twist_axis"], dtype=float)
+    h_local = np.array(rig["mapping"]["hand_twist_axis"]["right"], dtype=float)
     h_local /= np.linalg.norm(h_local)
     head = np.eye(4)
     head[:3, 3] = [0.0, 1.6, 0.0]
@@ -354,7 +354,7 @@ def test_intrinsic_twist_continuity_and_body_turn_invariance():
     ik = ArmIK(rig, "right")
     m = F.ClutchMapper(R_base_from_body(rig["arms"]["right"]["base_quat"]),
                        twist_mode="intrinsic",
-                       hand_twist_axis=rig["mapping"]["hand_twist_axis"],
+                       hand_twist_axis=rig["mapping"]["hand_twist_axis"]["right"],
                        ee_tool_axis=ik.ee_tool_axis_local)
     head0 = np.eye(4)
     head0[:3, 3] = [0.0, 1.6, 0.0]
