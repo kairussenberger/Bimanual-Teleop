@@ -457,6 +457,7 @@ def rig_info() -> dict:
 
 
 import glob
+import re
 import signal
 import subprocess
 import sys as _sys
@@ -475,39 +476,134 @@ class EngineManager:
         self.mode = None
         self.record = None
         self.t0 = None
+        self.adopted = False
         self.last_msg = "stopped"
         self._lock = threading.Lock()
+        # Adopt a healthy engine that predates this dashboard (restarted mid-
+        # session): an engine process exists and the render port answers.
+        try:
+            out = subprocess.run(["pgrep", "-fl", self.ENGINE_PATTERN],
+                                 capture_output=True, text=True).stdout
+            if out.strip():
+                socket.create_connection(("127.0.0.1", 8102), timeout=0.5).close()
+                m = re.search(r"--record (\S+)", out)
+                self.adopted, self.mode, self.t0 = True, "LIVE", time.time()
+                self.record = m.group(1) if m else None
+                self.last_msg = "adopted an engine that was already running"
+        except OSError:
+            pass
+
+    # Ports the engine must bind or it comes up as a husk: ORBIT ingest PULLs
+    # (the ingest thread dies on EADDRINUSE) and the render bridges (8101 zmq,
+    # 8102 TCP JSON — 8102 is what this dashboard reads). 8099 (orbit viz) is
+    # deliberately absent: the engine runs fine without it.
+    ENGINE_PORTS = (8087, 8088, 8095, 8100, 8101, 8102, 8122, 8123, 8200)
+    # '[-]m' anchor: matches 'python -m bimanual_teleop.launch.run_teleop' (and
+    # the uv wrapper) but not editors holding the source file open.
+    ENGINE_PATTERN = r"[-]m bimanual_teleop\.launch\.run_teleop"
+
+    @classmethod
+    def _busy_ports(cls):
+        busy = []
+        for p in cls.ENGINE_PORTS:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind(("127.0.0.1", p))
+            except OSError:
+                busy.append(p)
+            finally:
+                s.close()
+        return busy
 
     def _kill_strays(self):
-        subprocess.run(["pkill", "-INT", "-f", "bimanual_teleop.launch.run_teleop"],
-                       capture_output=True)
-        time.sleep(1.5)
+        """Kill ANY engine process (ours or not) and wait until the engine ports
+        are actually released — a graceful shutdown saves its recording first,
+        which takes seconds. A fixed sleep here once spawned husks straight into
+        EADDRINUSE. Returns the ports still busy ([] when clear to spawn)."""
+        def alive():
+            return subprocess.run(["pgrep", "-f", self.ENGINE_PATTERN],
+                                  capture_output=True).returncode == 0
+        if alive():
+            subprocess.run(["pkill", "-INT", "-f", self.ENGINE_PATTERN], capture_output=True)
+            deadline = time.time() + 12.0
+            while alive() and time.time() < deadline:
+                time.sleep(0.3)
+            if alive():                       # wedged — there is no save left to lose
+                subprocess.run(["pkill", "-9", "-f", self.ENGINE_PATTERN], capture_output=True)
+                time.sleep(0.5)
+        deadline = time.time() + 8.0
+        busy = self._busy_ports()
+        while busy and time.time() < deadline:
+            time.sleep(0.4)
+            busy = self._busy_ports()
+        return busy
 
     def _spawn(self, args, mode, record):
-        log = open(REPO_ROOT / "out" / "engine.log", "ab")
         (REPO_ROOT / "out").mkdir(exist_ok=True)
+        log_path = REPO_ROOT / "out" / "engine.log"
+        log = open(log_path, "ab")
+        log.write(f"\n===== {time.strftime('%H:%M:%S')} dashboard spawn: {mode} =====\n".encode())
+        log.flush()
+        scan_from = log_path.stat().st_size
         self.proc = subprocess.Popen([_sys.executable, "-m", "bimanual_teleop.launch.run_teleop", *args],
                                      cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT)
+        log.close()
         self.mode, self.record, self.t0 = mode, record, time.time()
-        self.last_msg = f"{mode} running"
+        # Health gate: "running" only once the render JSON port answers (that is
+        # the stream this dashboard draws from). EADDRINUSE in the log or an
+        # early exit means a husk — reap it and put the reason on the button row.
+        err = None
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                err = f"engine exited at startup (code {self.proc.returncode}) — see out/engine.log"
+                break
+            with open(log_path, "rb") as fh:
+                fh.seek(scan_from)
+                tail = fh.read()
+            if b"Address already in use" in tail:
+                err = "port conflict at startup — an old engine survived; press the button again"
+                break
+            try:
+                socket.create_connection(("127.0.0.1", 8102), timeout=0.3).close()
+                self.last_msg = f"{mode} running"
+                return
+            except OSError:
+                time.sleep(0.3)
+        if err is None:
+            err = "render port 8102 never came up — see out/engine.log"
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGINT)
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc, self.mode, self.record, self.t0 = None, None, None, None
+        self.last_msg = f"FAILED: {err}"
+
+    def _start(self, args, mode, record):
+        with self._lock:
+            self._stop_inner()
+            busy = self._kill_strays()
+            if busy:
+                self.last_msg = (f"FAILED: ports {busy} still busy after killing strays — "
+                                 "wait a few seconds and press again")
+                return self.status()
+            self._spawn(args, mode, record)
+            return self.status()
 
     def start_live(self):
-        with self._lock:
-            self._stop_inner()
-            self._kill_strays()
-            rec = f"recordings/live_{time.strftime('%m%d_%H%M%S')}.npz"
-            self._spawn(["--vr", "orbit", "--clutch", "always", "--record", rec], "LIVE", rec)
-            return self.status()
+        rec = f"recordings/live_{time.strftime('%m%d_%H%M%S')}.npz"
+        return self._start(["--vr", "orbit", "--clutch", "always", "--record", rec], "LIVE", rec)
 
     def start_replay(self, file: str, loop: bool):
-        with self._lock:
-            self._stop_inner()
-            self._kill_strays()
-            args = ["--vr", "replay", file] + (["--loop"] if loop else [])
-            self._spawn(args, f"REPLAY {Path(file).name}" + (" (loop)" if loop else ""), None)
-            return self.status()
+        args = ["--vr", "replay", file] + (["--loop"] if loop else [])
+        return self._start(args, f"REPLAY {Path(file).name}" + (" (loop)" if loop else ""), None)
 
     def _stop_inner(self):
+        if self.adopted:
+            self.adopted = False
+            self._kill_strays()               # graceful INT first — saves its recording
         if self.proc is not None and self.proc.poll() is None:
             self.proc.send_signal(signal.SIGINT)
             try:
@@ -526,10 +622,17 @@ class EngineManager:
             return self.status()
 
     def status(self):
-        alive = self.proc is not None and self.proc.poll() is None
-        if self.proc is not None and not alive and self.mode is not None:
-            self.last_msg = f"{self.mode} exited"
-            self.mode, self.record, self.t0 = None, None, None
+        if self.adopted:
+            alive = subprocess.run(["pgrep", "-f", self.ENGINE_PATTERN],
+                                   capture_output=True).returncode == 0
+            if not alive:
+                self.adopted, self.last_msg = False, "adopted engine exited"
+                self.mode, self.record, self.t0 = None, None, None
+        else:
+            alive = self.proc is not None and self.proc.poll() is None
+            if self.proc is not None and not alive and self.mode is not None:
+                self.last_msg = f"{self.mode} exited"
+                self.mode, self.record, self.t0 = None, None, None
         recs = sorted(glob.glob(str(REPO_ROOT / "recordings" / "*.npz")))
         return {"running": alive, "mode": self.mode, "record": self.record,
                 "uptime": round(time.time() - self.t0, 1) if (alive and self.t0) else None,
