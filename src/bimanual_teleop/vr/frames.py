@@ -303,6 +303,12 @@ class ClutchMapper:
         self.C = None
         if orientation_mode == "absolute":
             self.C = np.asarray(hand_ee_convention, dtype=float).reshape(3, 3)
+        # Operator neutral-pose calibration (POSITION ONLY, body axes — see
+        # vr/neutral_calib.py): per-axis scale + offset applied to the ctrl
+        # translation before the body→base rotation. Identity by default; only
+        # meaningful for body-relative ctrl samples in absolute position mode.
+        self.axis_scale = np.ones(3)
+        self.body_offset = np.zeros(3)
         self.anchor_ctrl: SE3 | None = None
         self.anchor_ee: SE3 | None = None
         self._blend_t0: float | None = None
@@ -315,12 +321,22 @@ class ClutchMapper:
         self.R = np.asarray(R, dtype=float).reshape(3, 3)
         self.release()   # force a fresh anchor on next engage
 
+    def set_calibration(self, axis_scale, body_offset) -> None:
+        """Install an operator neutral-pose POSITION calibration (body-axes
+        per-axis scale + offset). Releases the anchors so the next engage
+        latches a fresh offset and the arm GLIDES onto the new correspondence
+        (the same snap-free path as any re-engage)."""
+        self.axis_scale = np.asarray(axis_scale, dtype=float).reshape(3)
+        self.body_offset = np.asarray(body_offset, dtype=float).reshape(3)
+        self.release()
+
     @property
     def engaged(self) -> bool:
         return self.anchor_ctrl is not None
 
     def _p_abs(self, ctrl: SE3) -> np.ndarray:
-        return self.chest + self.scale * (self.R @ ctrl.translation())
+        w = self.axis_scale * ctrl.translation() + self.body_offset
+        return self.chest + self.scale * (self.R @ w)
 
     def _R_abs(self, ctrl: SE3) -> np.ndarray:
         """Absolute EE attitude (base frame): the operator's hand attitude mapped

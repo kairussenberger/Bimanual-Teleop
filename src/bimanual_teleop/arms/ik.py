@@ -144,6 +144,13 @@ class ArmIK:
     def reset(self) -> None:
         self.config.update(self.q0.copy())
         self.posture.set_target(self.q0.copy())
+        self._phi_prev = 0.0
+
+    def reset_twist(self) -> None:
+        """Drop the twist-demand continuity state (call on clutch engage: the
+        orientation glide makes the new demand continuous from the current
+        attitude, so stale unwrap state must not bias the next decomposition)."""
+        self._phi_prev = 0.0
 
     def seed(self, q: np.ndarray) -> None:
         self.config.update(np.asarray(q, dtype=float))
@@ -220,6 +227,19 @@ class ArmIK:
         phi = swing_twist_angle(R_err, a)
         iq = self._idx_q[5]
         q = self.config.q.copy()
+        # CONTINUITY UNWRAP while j6 is pinned at a stop: swing_twist_angle wraps
+        # to [-pi, pi], so once the joint saturates (the side with only 30 deg of
+        # roll headroom hits this constantly) and the operator keeps rolling, the
+        # demand crosses +-pi and FLIPS SIGN -- the clip then walks j6 the LONG
+        # way across its whole range through the wrist singularity while j4/j5
+        # wander (the measured pivot-to-the-side). Track the demand continuously
+        # while pinned so it keeps its sign and j6 simply stays at the stop.
+        pinned = (q[iq] <= self.soft_lo[5] + 0.02) or (q[iq] >= self.soft_hi[5] - 0.02)
+        if pinned:
+            cand = phi + 2.0 * np.pi * np.array([-1.0, 0.0, 1.0])
+            phi = float(cand[np.argmin(np.abs(cand - self._phi_prev))])
+            phi = float(np.clip(phi, -2.0 * np.pi, 2.0 * np.pi))
+        self._phi_prev = phi
         q5_new = float(np.clip(q[iq] + np.clip(phi, -budget, budget),
                                self.soft_lo[5], self.soft_hi[5]))
         applied = q5_new - float(q[iq])

@@ -31,3 +31,5 @@ unity/TeleopRenderer/Builds/
 
 # README media (exception to the *.gif / artifact ignores above)
 !docs/media/*
+# operator neutral-pose calibration (per-machine/per-operator runtime state)
+config/operator_calib.json

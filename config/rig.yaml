@@ -90,8 +90,27 @@ mapping:
   # YOUR forearm axis is a pure j6 roll about the EE's own tool axis (no j4/j5
   # singularity contortion); 'world' = fully extrinsic (diagnostics).
   twist_mode: intrinsic
-  hand_twist_axis: [0.0, 0.456, 0.890]  # forearm axis in the ORBIT hand frame (measured from a real roll session, 77% single-axis)
+  # Forearm/roll axis in the ORBIT hand frame. Re-measured 2026-06-11 from two
+  # sessions (9.5k fast-rotation samples, both hands agree): the old value
+  # [0, 0.456, 0.890] was ~10° off, which leaked sin(10°) of every unrealized
+  # roll radian into genuine swing demand (the left-arm pivot at the j6 stop).
+  hand_twist_axis: [0.031, 0.311, 0.950]
   pos_scale: 1.0
+  # Operator NEUTRAL-POSE calibration (position-only; orientation is calibration-
+  # free by contract). robot_neutral_wrist = where each wrist should sit, in body
+  # coords [right, up, forward] (m) relative to the chest anchor, when the operator
+  # holds the calibration pose (both arms extended straight forward at shoulder
+  # height). Probed 2026-06-11 with the real IK: comfortable max forward reach is
+  # ~0.52 m at lateral ±0.22 — neutral is set at ~90% of that, so the operator's
+  # full natural extension maps to near-full robot extension.
+  robot_neutral_wrist:
+    left:  [-0.22, 0.02, 0.46]
+    right: [0.22, 0.02, 0.46]
+  # Where the fitted scale/offset is persisted (per-machine, gitignored — like
+  # config/viz_calib.json). Auto-loaded on engine start for LIVE transports only
+  # (orbit/vuer); fake/replay stay identity so the acceptance gate and the session
+  # scorer stay deterministic.
+  calib_file: config/operator_calib.json
   # Legacy manual mapper trim (euler xyz, rad). In body_relative mode the runtime
   # installs the measured body->base mapping at calibration time; leave these at zero
   # unless you explicitly disable body_relative for diagnostics.
@@ -106,6 +125,33 @@ mapping:
 safety:
   staleness_s: 0.15   # VR sample older than this -> not fresh (hold/ramp)
   hold_s: 0.3         # on VR loss while engaged: hold last, then ramp to neutral
+  # Pairwise hand guard: each hand is a CAPSULE from the wrist hand_capsule_len
+  # metres toward the fingertips; the minimum distance between the two capsules
+  # (or vs a parked arm's capsule) is kept ≥ hand_min_separation by pushing the
+  # wrist targets apart along the closest-point line. Clapping brings the hands
+  # to CONTACT distance — palms, fingers, or fingertips-to-palm — never through.
+  hand_min_separation: 0.12
+  hand_capsule_len: 0.19
+  # Motion guardrails (sim AND the gateway to hardware):
+  # - target_speed_max / target_ang_speed_max cap how fast the commanded EE
+  #   target may translate/rotate (operator p99 measured ≈2 m/s).
+  # - target_jump_speed: implied speeds above this are NOT movements (tracking
+  #   glitches measured 58–65 m/s) — the mapper re-anchors and the arm GLIDES;
+  #   the violent motion simply never happens.
+  # - sim_rate_limit / sim_smooth_hz: the hardware-style joint command shaper now
+  #   ALSO runs in the sim/render path — published joints can never move faster
+  #   than this, whatever the IK does (singularity flips leave as bounded
+  #   glides). Set sim_rate_limit to hardware.rate_limit (1.2) for exact
+  #   real-robot motion parity before a hardware day.
+  target_speed_max: 0.8
+  target_jump_speed: 3.0
+  target_ang_speed_max: 2.5
+  # Attitude low-pass time constant (s): raw Quest wrist quats carry ~200°/s of
+  # high-frequency jitter (worse when the palm rotates away from the cameras);
+  # the commanded attitude slerps toward the demand with this τ. 0 disables.
+  target_ori_smooth_s: 0.12
+  sim_rate_limit: 1.8
+  sim_smooth_hz: 4.0
   workspace:          # axis-aligned EE target bounds in arm base frame (m)
     min: [-0.6, -0.85, -0.6]   # y-min lowered: arms-down home wrist sits at base-y≈-0.56;
     max: [0.6, 0.7, 0.6]       # old -0.2 clipped it +0.36m on engage -> arms curled to center
@@ -127,6 +173,12 @@ vr:
   torso_from_head: [0.0, -0.35, 0.0] # body-frame torso proxy from headset: right, up, forward (m)
   calib_seconds: 0.0  # arm mapping is calibration-free; >0 re-enables the optional legacy startup stillness hold (only steers arms when body_relative is false)
   cross_gap: 0.05     # min world-Y gap each hand keeps from center (anti-overlap guard, metres)
+  control_port: 8201  # localhost TCP line-JSON engine commands (dashboard CALIBRATE button)
+  # ORBIT streams the head floor-anchored but the wrists EYE-anchored (measured on
+  # a real session — see vr/orbit_source.py docstring). 'head' re-anchors wrist
+  # translations at the live head pose so the absolute body-relative mapping sees
+  # one consistent origin; 'world' = raw passthrough (future fixed ORBIT builds).
+  orbit_wrist_anchor: head
   cert_file: cert.pem
   key_file: key.pem
   ngrok: false        # true to tunnel for the Quest browser

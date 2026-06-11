@@ -741,6 +741,10 @@ def test_calibration_aligns_forward_and_no_cross():
     wm = lambda p: np.block([[np.eye(3), np.array(p).reshape(3, 1)], [0, 0, 0, 1]])
     rig = load_rig()
     rig["vr"]["body_relative"] = False      # this is the LEGACY raw-room mapping under test
+    # This contract test drives STEP inputs (0.25-0.5 m wrist jumps per tick) on
+    # purpose; disable the teleport guardrail so the alignment/no-cross contract
+    # stays the thing under test (the guardrail has its own tests).
+    rig["safety"]["target_jump_speed"] = 1e9
     for side, sign in (("left", -1), ("right", +1)):
         ac = ArmController(rig, side)
         ac.mapper.set_R(calibrate_R(lm, rig["arms"][side]["base_quat"]))

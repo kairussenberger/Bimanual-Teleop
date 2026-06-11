@@ -19,11 +19,24 @@ same trick the reference bridge (Orca-Yam-teleop/orca-teleop/vr_zmq.py) uses:
 
     M_webxr = S4 @ M_unity @ S4,   S4 = diag(1, 1, -1, 1)
 
-`orbit_flip` (rig vr.orbit_flip, default "z") is the ONLY empirical knob: if motion
-is mirrored on hardware, change which axis S negates. ORBIT's hand keypoints are
-headset-relative and its wrist pose is XR-Origin world, but both share the same
-internal frame (wrist-pose pos == hand keypoint[0]) and the engine's clutch mapper
-is RELATIVE, so absolute origin offsets cancel — no extra alignment needed here.
+`orbit_flip` (rig vr.orbit_flip, default "z") is an empirical knob: if motion is
+mirrored on hardware, change which axis S negates.
+
+FRAME ORIGINS (measured on a real session, 2026-06-11 — recordings/live_0611_124653):
+ORBIT streams the HEAD pose in a floor-origin world frame (standing head y ≈ 1.4)
+but the WRIST poses in an EYE-HEIGHT anchored frame (the Unity XR recenter origin:
+resting hands read y ≈ −0.3, NOT ≈ +1.0). The old note here claimed the offset
+cancels because "the clutch mapper is RELATIVE" — that stopped being true when the
+mapping went ABSOLUTE: subtracting the head-derived torso from a wrist in a
+different origin put a phantom ~−1 m on the body-relative UP axis (operator
+calibration then measured arms-forward as hip-height). `latest()` therefore
+re-anchors each wrist TRANSLATION at the live head position (rotation untouched —
+wrist attitudes were already world-axes and the verified absolute-orientation
+mapping worked). Exact when the operator's posture matches the recenter pose;
+a deep crouch/lean couples in by the head's displacement since recenter (the
+hand keypoints are wrist-relative downstream, so they need no fix). Set
+`vr.orbit_wrist_anchor: world` to restore raw passthrough for a future ORBIT
+build that streams both poses in one frame.
 
 ORBIT sends **26** joints (it adds a `Palm` at index 1 that WebXR lacks); dropping
 index 1 yields exactly the **25** WebXR joints in W3C order, so landmark indices
@@ -114,6 +127,10 @@ class OrbitVRSource(VRSource):
         self.head_timeout = float(v.get("orbit_head_timeout", max(1.0, self.timeout)))
         self.auto_reverse = bool(v.get("orbit_adb_reverse", True))
         self.S4 = _S4(str(v.get("orbit_flip", "z")))
+        # 'head' (default): re-anchor wrist translations at the live head pose —
+        # ORBIT streams wrists eye-anchored but the head floor-anchored (see module
+        # docstring). 'world': raw passthrough.
+        self.wrist_anchor = str(v.get("orbit_wrist_anchor", "head"))
         self.viz_port = int(v.get("orbit_viz_port", 8099))
         self.viz_enabled = bool(v.get("orbit_viz", True))
         self.viz_url = None
@@ -147,17 +164,24 @@ class OrbitVRSource(VRSource):
     def latest(self) -> VRFrame | None:
         now = time.monotonic()
         with self._lock:
+            head = self._head.copy() if self._head_last > 0 and (now - self._head_last) < self.head_timeout else None
             hands = {}
             for s in SIDES:
                 w = self._wrist[s]
                 wrist_fresh = w is not None and (now - self._wrist_last[s]) < self.timeout
                 lm = self._lm[s] if (now - self._lm_last[s]) < self.timeout else None
                 if wrist_fresh:
+                    if self.wrist_anchor == "head" and head is not None:
+                        # ORBIT wrists are eye-anchored, the head floor-anchored:
+                        # re-anchor the TRANSLATION so both share one origin (the
+                        # body-relative subtraction downstream then cancels the
+                        # head exactly). Rotation is already world-axes — untouched.
+                        w = w.copy()
+                        w[:3, 3] += head[:3, 3]
                     hands[s] = HandSample(tracked=True, wrist=w, landmarks=lm,
                                           pinch=_pinch_from_landmarks(lm))
                 else:
                     hands[s] = HandSample(tracked=False)
-            head = self._head.copy() if self._head_last > 0 and (now - self._head_last) < self.head_timeout else None
             return VRFrame(stamp=now, head=head, hands=hands)
 
     def start(self) -> None:

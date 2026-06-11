@@ -1,29 +1,48 @@
 """The teleop engine: per-side arm + hand controllers.
 
-The arm mapping is CALIBRATION-FREE in the default body-relative mode: positions
-are torso→wrist vectors in body axes, and orientation is the wrist rotation since
-clutch-engage mapped to the corresponding robot-world axes (see ClutchMapper).
+The arm ORIENTATION mapping is CALIBRATION-FREE in the default body-relative
+mode: positions are torso→wrist vectors in body axes, and orientation is the
+wrist attitude mapped to the corresponding robot-world axes (see ClutchMapper).
 `vr.calib_seconds` therefore defaults to 0 and the arms follow as soon as a hand
 is tracked + engaged.
+
+POSITION can additionally be fitted to the operator at runtime via the
+NEUTRAL-POSE calibration (vr/neutral_calib.py): triggered from the dashboard
+(control_server), the operator extends both arms forward and holds still; the
+fitted body-axes scale/offset is applied to both ClutchMappers (arms glide onto
+the new correspondence) and persisted. While the capture runs, the ARMS FREEZE
+at their current pose and the fingers keep tracking. Orientation is never
+calibrated — that contract stands (see CLAUDE.md).
 
 Setting `vr.calib_seconds > 0` enables the optional legacy startup STILLNESS hold
 (operator stands arms at sides for N seconds). It measures the operator's body
 frame from the head pose, which only steers arm motion when `vr.body_relative`
 is explicitly disabled for diagnostics; otherwise it is a stillness/quality gate.
 
-`calib_status` is published every tick for the in-headset visual (vr/vuer_source):
-the operator can SEE the countdown and when to stop holding still.
+`calib_status` is published every tick for the dashboard banner and the
+in-headset visual (vr/vuer_source): the operator can SEE the prompt/progress.
+
+Every tick also runs the pairwise HAND SEPARATION guard (safety/separation.py):
+the two wrist targets — or a parked arm's actual wrist — are kept at least
+`safety.hand_min_separation` apart, so clashing the operator's hands brings the
+robot hands to contact distance, never through each other.
 
 Sink = anything with set_arm(side, q) / set_hand(side, joints_deg): Unity render
 now, the hardware drivers later.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
+
 from .arms.arm_control import ArmController
-from .config import SIDES
+from .config import REPO_ROOT, SIDES
 from .hands.hand_control import HandController
+from .safety.separation import separate_capsules
 from .vr.calibrate import Calibrator, R_base_from_body, body_relative_hand_sample
 from .vr.frames import HandSample, VRFrame
+from .vr.neutral_calib import NeutralPoseCalibration, load_calibration
 
 
 class TeleopEngine:
@@ -49,19 +68,173 @@ class TeleopEngine:
                                  "msg": "DROP YOUR ARMS TO YOUR SIDES"}
         elif self.body_relative:
             self._set_body_relative_mapping()
+        # --- operator neutral-pose calibration (position-only, runtime) ----- #
+        self.neutral = NeutralPoseCalibration(rig)
+        self.calib_summary: dict | None = None     # applied scale/offset, for the dashboard chip
+        self._calib_file = self._resolve_calib_path(rig)
+        self._req_calib = False                    # set from the control-server thread,
+        self._req_calib_cancel = False             # consumed by tick() on the control loop
+        self._req_calib_clear = False
+        # Auto-load a persisted fit for LIVE transports only: fake/replay stay
+        # identity so the acceptance gate and the session scorer are deterministic
+        # (override with vr.use_calib: true for calibrated replays).
+        transport = rig.get("vr", {}).get("transport", "fake")
+        if self._calib_file and (transport in ("orbit", "vuer") or rig.get("vr", {}).get("use_calib")):
+            res = load_calibration(self._calib_file)
+            if res is not None:
+                self._apply_calibration(res, announce=f"loaded {self._calib_file}")
+        # Pairwise hand guard: capsule length (wrist → fingertips) + min distance
+        # between the two capsules (0 disables).
+        self.hand_min_sep = float(rig.get("safety", {}).get("hand_min_separation", 0.12))
+        self.hand_capsule_len = float(rig.get("safety", {}).get("hand_capsule_len", 0.19))
 
     def tick(self, frame: VRFrame | None, engaged: dict[str, bool], t: float) -> None:
+        self._drain_calib_requests(t)
         if not self.calibrated:
             self._calibration_tick(frame, t)
+            return
+        if self.neutral.active:
+            self._neutral_tick(frame, t)
             return
         # Keep the "CALIBRATED ✓" banner up briefly, then clear it.
         if self.calib_status is not None:
             if self._done_t is not None and (t - self._done_t) > 2.5:
                 self.calib_status = None
+        plans = {}
         for s in SIDES:
             hs = frame.hands.get(s) if frame else None
-            self.sink.set_arm(s, self.arm[s].update(self._arm_hand_sample(hs, frame), engaged.get(s, False), t))
-            self.sink.set_hand(s, self.hand[s].update(hs, t))
+            plans[s] = self.arm[s].plan(self._arm_hand_sample(hs, frame), engaged.get(s, False), t)
+        self._separate_hands(plans)
+        for s in SIDES:
+            self.sink.set_arm(s, self.arm[s].commit(plans[s], t))
+            self.sink.set_hand(s, self.hand[s].update(frame.hands.get(s) if frame else None, t))
+
+    # ---- pairwise hand separation ----------------------------------------- #
+    def _separate_hands(self, plans: dict[str, dict | None]) -> None:
+        """Keep the two hand CAPSULES (wrist → wrist + capsule_len·fingers_dir,
+        the full ORCA volume from wrist to fingertips) ≥ hand_min_separation
+        apart, in 3D. Point-pair guards proved insufficient on a real clap:
+        with the wrist points 17 cm apart the fingertips still reached 0.4 cm
+        from the other palm. The push shifts the engaged sides' wrist TARGETS
+        along the line between the capsules' closest points; a disengaged side
+        is a fixed obstacle (its live pose enters the math but never moves)."""
+        if self.hand_min_sep <= 0.0:
+            return
+        mv = {s: plans[s] is not None for s in SIDES}
+        if not (mv["left"] or mv["right"]):
+            return
+        cw = {s: (plans[s]["pw"] if mv[s] else self.arm[s].wrist_world()) for s in SIDES}
+        cd = {s: (plans[s]["fingers_dir"] if mv[s] else self.arm[s].fingers_dir_world())
+              for s in SIDES}
+        # The robot tracks its commands with lag (shaper), so command-vs-command
+        # clearance alone lets the lagging ACHIEVED poses pass closer mid-flight
+        # (measured 0.9 cm achieved with 12 cm commanded on a real clap). Each
+        # command must therefore also clear the other arm's ACHIEVED capsule —
+        # never command into space the other hand still occupies.
+        aw = {s: self.arm[s].wrist_world() for s in SIDES}
+        ad = {s: self.arm[s].fingers_dir_world() for s in SIDES}
+        L, d = self.hand_capsule_len, self.hand_min_sep
+        for _ in range(2):                       # interleaved constraints → settle
+            cw["left"], cw["right"] = separate_capsules(
+                cw["left"], cw["right"], cd["left"], cd["right"], L, d,
+                move_left=mv["left"], move_right=mv["right"])
+            if mv["left"]:
+                cw["left"], _ = separate_capsules(cw["left"], aw["right"], cd["left"],
+                                                  ad["right"], L, d, move_right=False)
+            if mv["right"]:
+                _, cw["right"] = separate_capsules(aw["left"], cw["right"], ad["left"],
+                                                   cd["right"], L, d, move_left=False)
+        for s in SIDES:
+            if mv[s]:
+                plans[s]["pw"] = cw[s]
+
+    # ---- neutral-pose calibration plumbing --------------------------------- #
+    @staticmethod
+    def _resolve_calib_path(rig: dict) -> Path | None:
+        raw = rig.get("mapping", {}).get("calib_file", "config/operator_calib.json")
+        if not raw:
+            return None
+        p = Path(raw)
+        return p if p.is_absolute() else REPO_ROOT / p
+
+    def _apply_calibration(self, res, announce: str) -> None:
+        for s in SIDES:
+            self.arm[s].mapper.set_calibration(res.axis_scale, res.body_offset)
+        self.calib_summary = res.summary()
+        print(f"[calib] {announce}: axis_scale={np.round(res.axis_scale, 3).tolist()} "
+              f"body_offset={np.round(res.body_offset, 3).tolist()}", flush=True)
+
+    # Request methods are called from the control-server thread: they only set
+    # flags (atomic under the GIL); all real work happens in tick().
+    def request_calibration(self) -> None:
+        self._req_calib = True
+
+    def request_calibration_cancel(self) -> None:
+        self._req_calib_cancel = True
+
+    def request_calibration_clear(self) -> None:
+        self._req_calib_clear = True
+
+    def _drain_calib_requests(self, t: float) -> None:
+        if self._req_calib_clear:
+            self._req_calib_clear = False
+            if self.neutral.active:
+                self.neutral.cancel("calibration cleared")
+            for s in SIDES:
+                self.arm[s].mapper.set_calibration(np.ones(3), np.zeros(3))
+            self.calib_summary = None
+            if self._calib_file is not None:
+                try:
+                    self._calib_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self.calib_status = {"active": False, "kind": "neutral", "phase": "cancelled",
+                                 "progress": 0.0, "remaining": 0.0, "left": False,
+                                 "right": False, "msg": "calibration cleared — back to 1:1"}
+            self._done_t = t
+        if self._req_calib_cancel:
+            self._req_calib_cancel = False
+            if self.neutral.active:
+                self.neutral.cancel()
+                self.calib_status = self.neutral.status(t)
+                self._done_t = t
+        if self._req_calib:
+            self._req_calib = False
+            if not self.neutral.active:
+                self.neutral.start(t)
+                print("[calib] neutral-pose capture started — extend both arms forward "
+                      "and hold still", flush=True)
+
+    def _neutral_tick(self, frame: VRFrame | None, t: float) -> None:
+        """One capture tick: arms FREEZE at their current pose, fingers keep
+        tracking, the state machine eats body-relative wrist samples."""
+        samples: dict[str, np.ndarray | None] = {}
+        for s in SIDES:
+            hs_raw = frame.hands.get(s) if frame else None
+            hs = self._arm_hand_sample(hs_raw, frame)
+            w = None
+            if hs is not None and hs.tracked:
+                W = np.asarray(hs.wrist, dtype=float)
+                if W.shape == (4, 4) and np.all(np.isfinite(W[:3, 3])):
+                    w = W[:3, 3]
+            samples[s] = w
+            self.sink.set_arm(s, self.arm[s].ik.q)                  # hold current pose
+            self.sink.set_hand(s, self.hand[s].update(hs_raw, t))   # fingers can track meanwhile
+        self.neutral.tick(samples, t)
+        self.calib_status = self.neutral.status(t)
+        if self.neutral.phase == "done" and self.neutral.result is not None:
+            res = self.neutral.result
+            self.neutral.result = None                              # consume once
+            self._apply_calibration(res, announce="neutral-pose fit")
+            if self._calib_file is not None:
+                try:
+                    res.save(self._calib_file)
+                    print(f"[calib] saved → {self._calib_file}", flush=True)
+                except OSError as e:
+                    print(f"[calib] save failed: {e}", flush=True)
+            self._done_t = t                                        # banner fades in 2.5 s
+        elif not self.neutral.active:                               # cancelled / timed out
+            self._done_t = t
 
     def _set_body_relative_mapping(self) -> None:
         for s in SIDES:

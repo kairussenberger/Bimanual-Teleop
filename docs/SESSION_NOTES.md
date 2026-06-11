@@ -1,0 +1,283 @@
+# Session change notes
+
+Running log of changes made by Claude during working sessions, newest first.
+Each entry: what changed, why, and exactly which files were touched.
+
+---
+
+## 2026-06-11 (4th pass) — mirrored dashboard fix, left-roll taming, attitude smoothing
+
+**From recordings/live_0611_133349.npz** (user: right-arm roll fixed, left
+wrist still pivots sideways at the end; "left hand moves the right arm on the
+model"; smoothing looked good).
+
+**1. "Arms the wrong way around" = the dashboard 3D projection was MIRRORED.**
+Engine-side mapping verified correct on the recording (left-hand lateral ↔
+left-arm EE world-Y corr +0.80; cross-corr negative). The page's `camOf` built
+the camera basis as `right = up × fwd` — LEFT-handed — so every panel rendered
+horizontally mirrored: anatomically the robot's left arm drew where its right
+should be (the L/R letters follow the mirror, hence "labeled correctly" yet
+crossed). Fixed to `right = fwd × up`, `up = right × fwd`; the view buttons'
+values were visually swapped by the same bug → swapped back, and the DEFAULT
+camera is now a true BEHIND-the-robot view (over-the-shoulder embodiment: your
+left hand drives the screen-left arm). `scripts/dashboard.py` only.
+
+**2. Left-wrist roll pivot — three compounding causes found by replay:**
+   - j6 headroom is asymmetric by the frozen rest contract (rest ∓90°, motor
+     ±120°): the user's roll direction gives the left arm 30° where the right
+     gets 210° — the left pins constantly, the right almost never (why "right
+     is fixed, left isn't").
+   - Past the stop, the wrapped twist error (±π) can FLIP SIGN and walk j6 the
+     long way through the wrist singularity. Two-layer fix: continuity unwrap
+     in `ik._apply_twist` while pinned (`ik.reset_twist()` on engage), plus a
+     stateless demand-level roll clamp in the controller
+     (`_saturate_roll`: roll measured from REST about the EE tool axis,
+     clipped to the j6 window + 0.35 rad slack — small overspills keep the
+     wears-the-attitude contract, the wrap zone is unreachable).
+     `tests/test_guardrails.py` pins both sides rolled 6 rad past the stop:
+     pinned, no long-way travel, j4/j5 < 0.3 rad wander.
+   - Raw Quest wrist quats carry ~200°/s of HIGH-FREQUENCY jitter (worse on
+     the rolled/occluded hand; position had One-Euro, orientation had NO
+     filter). Added an attitude slerp low-pass to the governor
+     (`safety.target_ori_smooth_s` = 0.12 s), merged with the angular cap.
+   - Also re-measured `mapping.hand_twist_axis` from 9.5k fast-rotation
+     samples across both sessions: [0.031, 0.311, 0.950] (old value ~10° off).
+   Replay scoreboard (left arm, the roll exercise): j5 wander while pinned
+   0.90 → 0.46 rad, q4-at-soft-floor ticks 98 → 59, no more multi-second
+   pinned thrash stretches. HONEST RESIDUAL: j4 still sweeps up to ~1.2 rad
+   during extreme left rolls — the demanded attitude genuinely contains that
+   swing (hand-axis convention error + degraded tracking of the rolled hand);
+   needs a live check and possibly per-side hand-axis measurement next.
+
+**Files.** `scripts/dashboard.py` (camera basis, default view, button swap),
+`arms/ik.py` (pinned twist unwrap + reset_twist), `arms/arm_control.py`
+(_saturate_roll, attitude low-pass, rest references), `config/rig.yaml`
+(hand_twist_axis re-measured, safety.target_ori_smooth_s),
+`tests/test_guardrails.py` (+2 roll-saturation contract tests). Gate:
+**199 tests + probes green.**
+
+---
+
+## 2026-06-11 (3rd pass) — singularity taming, motion guardrails, capsule clap fix
+
+**Why.** Session recordings/live_0611_130501.npz (first with working
+calibration): (1) left-wrist roll drove the IK through wrist singularities —
+measured j4 20.5 / j6 25.1 rad/s with full-range j6 flips as j5 crossed zero
+(j6 headroom is asymmetric: rest −90°, range ±120°); (2) operator asked for
+deploy-grade guardrails: "a lot of movement in a short timeframe → simply
+don't do that movement", smooth/slow everything; (3) hands STILL clapped
+through each other — the point-pair guard held the wrist points 17 cm apart
+while the fingertips reached 0.4 cm from the other palm.
+
+**What.** Three layers, all sized from the recording (operator real-motion
+p99 ≈ 2 m/s; tracking glitches 58–65 m/s):
+
+1. **Target governor** (`arm_control.plan`): teleport rejection on the RAW
+   body-frame wrist signal (> `safety.target_jump_speed` 3 m/s ⇒ the motion
+   does not happen — mapper re-anchors, arm glides from its current pose);
+   world-frame caps on commanded target speed (`target_speed_max` 0.8 m/s)
+   and attitude rate (`target_ang_speed_max` 2.5 rad/s, clamped axis-angle
+   slerp). Jump test deliberately reads the operator signal, NOT the mapped
+   target — the engage glide legitimately demands ~1.5 m/s of target motion
+   and must never read as a jump (first implementation got this wrong and
+   livelocked under sustained fast motion).
+2. **In-loop joint shaper** (`arm_control.commit`): the hardware-boundary
+   `JointCommandShaper` (limit clamp + hard rate cap + critically-damped
+   tracker) now runs in the sim/render path too — `safety.sim_rate_limit`
+   1.8 rad/s, `sim_smooth_hz` 4.0. The shaped pose is seeded back into the
+   IK (`ik.seed`) so FK/render/next-solve see ONE consistent robot. Replay
+   verification: every joint-velocity peak in the session collapsed from
+   17–25 rad/s to exactly 1.8 rad/s; singularity flips leave as bounded
+   glides. Set sim_rate_limit = hardware.rate_limit (1.2) for exact
+   hardware-day parity. Idle arms bleed velocity to a stop instead of
+   freezing. NOTE: analyze_session IK-tracking-gap scores now include shaper
+   lag during fast motion — that is the honest new behavior.
+3. **Capsule separation** (`safety/separation.py`, `engine._separate_hands`):
+   each hand is a capsule wrist → wrist + `safety.hand_capsule_len` (0.19 m)
+   along the EE fingers axis; minimum segment-segment distance ≥
+   `hand_min_separation` (0.12), iterated 4× (a single distance push
+   under-resolves INTERSECTING anti-parallel capsules). Replaces the
+   palm-point pass (`safety.palm_center_offset` removed). Additionally each
+   arm's COMMAND must clear the other arm's ACHIEVED capsule — the shaper
+   lag let achieved poses pass closer than their separated commands
+   (measured 0.9 cm achieved vs 12 cm commanded); commanding only into
+   unoccupied space fixed it. Replay: minimum achieved capsule gap across
+   the whole session (clap included) 0.9 cm → 5.3 cm. Raise
+   `hand_min_separation` to ~0.15 for more visual clearance.
+
+**Files.** `arms/arm_control.py` (governor, shaper, fingers_dir refactor,
+`commit(plan, t)`), `engine.py` (capsule + achieved-pose separation),
+`safety/separation.py` (`closest_points_segments`, `separate_capsules`),
+`config/rig.yaml` (guardrail knobs), `tests/test_guardrails.py` (NEW: 8
+tests), `tests/test_neutral_calib.py` (capsule clap asserts),
+`tests/test_pipeline.py` (legacy step-input test gets an explicit
+`target_jump_speed` override — it teleports the wrist by design), Unity
+fixture regenerated. Gate: **197 tests + probes green.**
+
+---
+
+## 2026-06-11 (later) — ORBIT frame-origin fix + palm-center separation
+
+**Why.** First real calibrated session (recordings/live_0611_124653.npz)
+failed two ways: (1) after calibration the arms sat at HIP height while the
+operator held them extended forward; (2) clapping still drove the hands
+through each other.
+
+**Root cause 1 — mixed frame origins in the ORBIT stream.** Forensics on the
+recording: the HEAD pose streams floor-anchored (head y ≈ 1.11–1.56 m) while
+the WRIST poses stream EYE-anchored (resting hands y ≈ −0.3, range −0.74..
++0.57 — nowhere near floor-origin heights). The old orbit_source docstring
+even said origin offsets "cancel because the clutch mapper is RELATIVE" —
+stale since the mapping went ABSOLUTE. The body-relative subtraction
+(wrist − head-derived torso) therefore carried a phantom ≈ −1.3 m on the UP
+axis: the saved calibration meta recorded the operator's neutral at
+up = −0.96 m (anatomically impossible), the fit clamped its offset at +0.4,
+and the arms landed at hip height. Verified fix candidate against the
+recording: re-anchoring wrist TRANSLATIONS at the live head position makes
+every still window anatomically correct (hands-on-lap −0.26 up, raised
+forward +0.10..0.15 up), and corr(Δhead_y, Δwrist_raw_y) ≈ +0.2 (not the
+strong negative a camera-anchored stream would show) pins the wrist frame as
+a FIXED eye-height recenter anchor. Rotation untouched (wrist attitudes were
+already world-axes — which is why absolute ORIENTATION worked all along).
+NOT a missing dependency; the friend's bridge is delta-based so origin
+offsets cancel for him — our absolute mapping exposes them.
+
+- `vr/orbit_source.py` — `latest()` re-anchors each fresh wrist translation
+  at the live head position (knob `vr.orbit_wrist_anchor: head|world`,
+  default head); module docstring rewritten with the measured evidence.
+  Caveat documented: exact at normal posture; a deep crouch/lean couples in
+  by the head's displacement since recenter.
+- `config/rig.yaml` — `vr.orbit_wrist_anchor: head`.
+- `tests/test_orbit_anchor.py` — NEW: recombination math, world passthrough,
+  fail-closed without a head pose.
+- Deleted `config/operator_calib.json` (fitted on corrupted frames — must
+  not auto-load). **Operator must RE-CALIBRATE on the next live session.**
+- NOTE: recordings made BEFORE this fix store the mismatched frames (the
+  recorder captures post-source VRFrames), so absolute-position metrics on
+  them are not meaningful; orientation metrics remain valid.
+
+**Root cause 2 — separation guarded the wrong point.** The guard kept the
+WRIST targets 12 cm apart, but the ORCA hand volume sits ~9 cm beyond the
+wrist along the fingers axis — palms-facing claps collide at the palm
+centers, which could still coincide. The guard now runs TWO passes: palm
+centers first (projected via the commanded EE orientation; a parked arm uses
+its live FK), then wrists, each pass shifting the engaged sides' wrist
+targets along the violating line.
+
+- `arms/arm_control.py` — `palm_off_ee` from the rest-contract hand basis ×
+  `safety.palm_center_offset` (new knob, 0.09 m); `plan()` returns
+  `palm_dir`; `palm_dir_world()` for parked arms.
+- `engine.py` — `_separate_hands()` two-pass palm+wrist projection.
+- `config/rig.yaml` — `safety.palm_center_offset: 0.09`.
+- `tests/test_neutral_calib.py` — clap test now asserts palm-center gap too.
+
+Gate after both fixes: **189 tests + all probes green.**
+
+---
+
+## 2026-06-11 — Operator neutral-pose calibration + hand minimum-separation guard
+
+**Why.** Two operator-reported issues from the first live Quest sessions:
+1. The 1:1 absolute position mapping doesn't fit the operator — the YAM's
+   reach/mounting proportions differ from a human arm, so the mapping felt
+   "off" with no way to adapt it.
+2. Clapping the hands together drove the robot hands *through* each other in
+   sim — the only guard was the world-Y anti-cross clamp (`vr.cross_gap`,
+   ±5 cm), which neither models hand volume nor acts in 3D.
+
+**What.**
+- **Neutral-pose calibration** (position-only; orientation mapping remains
+  calibration-free BY CONTRACT — see CLAUDE.md, the 145°-axis-error lesson):
+  a runtime, operator-triggered capture. The operator extends both arms
+  straight forward at shoulder height and holds ~2.5 s of stillness; from the
+  per-side mean torso→wrist vector we fit, in body axes:
+  - lateral scale `s_lat` = robot neutral lateral / operator neutral lateral,
+  - reach scale `s_fwd` = robot neutral forward / operator neutral forward
+    (shared by the vertical axis — both are arm-length bound),
+  - an up/forward offset aligning operator-neutral with robot-neutral
+    (lateral offset forced to 0 so the midline stays the midline).
+  Applied live inside `ClutchMapper._p_abs` (scale/offset on the body-axes
+  wrist vector, before the body→base rotation); mapper anchors release so the
+  arms GLIDE onto the new correspondence (same snap-free path as re-engage).
+  Robot neutral reference per side comes from `mapping.robot_neutral_wrist`
+  in `config/rig.yaml` — probed with the real IK on 2026-06-11:
+  comfortable max forward ≈ 0.52 m at lateral ±0.22 → neutral set to
+  `[∓0.22, +0.02, +0.46]` (≈90% of comfortable max).
+  Persisted to `config/operator_calib.json` (gitignored, like
+  `viz_calib.json`); auto-loaded on engine start for LIVE transports
+  (orbit/vuer) only — fake/replay stay identity so `verify_stack` and
+  `analyze_session` remain deterministic.
+- **Dashboard CALIBRATE button + guided prompts.** New engine control channel
+  (stdlib TCP line-JSON on `vr.control_port` = 8201, localhost) lets the
+  dashboard trigger `calibrate` / `calibrate_cancel` / `calibrate_clear` on
+  the RUNNING engine. The page shows a prominent calibration banner driven by
+  `status.calib` from the render stream (prompt text, per-side tracked ticks,
+  hold-still progress), and a persistent `CAL ✓` chip from the new
+  `status.calib_applied` field. During capture the arms FREEZE at their
+  current pose (fingers keep tracking), then glide on completion.
+- **Hand minimum-separation guard.** New pairwise 3D guard
+  (`safety/separation.py` + `safety.hand_min_separation` in rig.yaml,
+  default 0.12 m): every tick, the two wrist TARGETS (or the parked arm's
+  actual wrist for a disengaged side) are kept ≥ d_min apart by symmetric
+  projection along their connecting line — clap and the robot hands meet and
+  STOP at contact distance instead of interpenetrating. Runs after the
+  per-side workspace/anti-cross clamps (order is safe: the push moves each
+  hand deeper into its own half-space, never across the midline). Engaged
+  sides get pushed; parked sides are treated as obstacles.
+- `ArmController` split into `plan()` (mapping + clamps → world target) and
+  `commit()` (IK solve) so the engine can coordinate the pair between the
+  two; `update()` remains as plan+commit so every existing call-site and test
+  is untouched.
+
+**Files.**
+- `src/bimanual_teleop/vr/neutral_calib.py` — NEW: state machine
+  (wait→hold→done/cancelled, stillness + extended-pose gates, 120 s timeout),
+  scale/offset math, JSON persistence with range validation.
+- `src/bimanual_teleop/safety/separation.py` — NEW: pure
+  `separate_targets()` (symmetric/one-sided push, degenerate fallback axis).
+- `src/bimanual_teleop/control_server.py` — NEW: stdlib TCP line-JSON
+  command server bound to 127.0.0.1, one command per connection.
+- `src/bimanual_teleop/vr/frames.py` — ClutchMapper: `axis_scale` /
+  `body_offset` fields, `set_calibration()` (releases anchors → glide),
+  `_p_abs` applies them in body axes.
+- `src/bimanual_teleop/arms/arm_control.py` — plan/commit split + `wrist_world()`.
+- `src/bimanual_teleop/engine.py` — neutral-calibration tick path (arms hold,
+  fingers track, status published), thread-safe request/cancel/clear flags,
+  calib file load/apply/save, pairwise separation in the normal tick,
+  `calib_summary` for the render stream.
+- `src/bimanual_teleop/render_sink.py` — `status.calib_applied` (additive
+  schema field; Unity's JsonUtility ignores it).
+- `src/bimanual_teleop/launch/run_teleop.py` — starts/stops the ControlServer.
+- `scripts/dashboard.py` — CALIBRATE/CANCEL button, `clear cal` button,
+  calibration banner with progress bar, `CAL ✓` chip, control-port proxy
+  actions, ENGINE_PORTS += 8201.
+- `config/rig.yaml` — `mapping.robot_neutral_wrist`, `mapping.calib_file`,
+  `vr.control_port`, `safety.hand_min_separation`.
+- `.gitignore` — `config/operator_calib.json`.
+- `tests/test_neutral_calib.py` — NEW: mapper math, separation geometry,
+  state-machine lifecycle, persistence round-trip, engine integration
+  (freeze during capture, apply on done, clap-separation end-to-end).
+
+**Behavioral notes.**
+- Replaying a session recorded WITH calibration applies identity unless the
+  rig sets `vr.use_calib: true` — raw VR frames are recorded, so replays
+  re-map through whatever calibration is active at replay time.
+- The separation guard also binds in `--vr fake` (the synthetic hands pass
+  within 10 cm laterally); targets get pushed apart — expected, not a bug.
+
+---
+
+## 2026-06-11 — Branch switch + environment repair (no code changes)
+
+- Re-pointed `~/Developer/orca_core` symlink →
+  `~/Developer/Bimanual_Humanoid/orca_core` after the user moved repos off
+  the iCloud Desktop (editable install was failing with "Distribution not
+  found"). The `auto/teleop-foundation` branch later made orca-core optional.
+- Checked out `auto/teleop-foundation` (replacing local `main` per user
+  request); the two uncommitted local changes (`link-mode=copy` pyproject
+  workaround, FakeVRSource natural-pose fix) are parked in
+  `git stash list` → "pre-branch-switch: link-mode=copy + FakeVRSource
+  natural pose fix".
+- Killed a 4-day-old orphaned `orbit_to_unity.py --debug` (old
+  `orca-teleop-unity` project) that was squatting on all seven ORBIT ports
+  and blocking the dashboard's engine spawns.

@@ -109,12 +109,23 @@ def main() -> int:
             render_ports.append(int(sink.json_endpoint.rsplit(":", 1)[1]))
         if render_ports:
             _adb_reverse_render(render_ports)
+    # Localhost command channel (dashboard CALIBRATE button → running engine).
+    # Best-effort: a busy port must never block teleop itself.
+    ctl = None
+    ctl_port = int(rig.get("vr", {}).get("control_port", 8201))
+    try:
+        from ..control_server import ControlServer
+        ctl = ControlServer(engine, ctl_port)
+    except OSError as e:
+        log.warning("engine control channel disabled (port %d): %s", ctl_port, e)
+
     src.start()
-    log.info("teleop running | transport=%s | clutch=%s | render → %s | unity-json → %s | Ctrl+C to stop",
+    log.info("teleop running | transport=%s | clutch=%s | render → %s | unity-json → %s | control → %s | Ctrl+C to stop",
              args.vr,
              clutch_name,
              sink.endpoint if sink.zmq_enabled else "disabled",
-             sink.json_endpoint if sink.json_enabled else "disabled")
+             sink.json_endpoint if sink.json_enabled else "disabled",
+             ctl.endpoint if ctl is not None else "disabled")
 
     # Engines are routinely children of background/non-interactive shells, which
     # inherit SIGINT=SIG_IGN — Python then never installs KeyboardInterrupt, so a
@@ -156,6 +167,8 @@ def main() -> int:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         src.stop()
+        if ctl is not None:
+            ctl.close()
         sink.close()
         if recorder is not None:
             recorder.save(args.record)

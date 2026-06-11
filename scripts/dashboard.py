@@ -210,20 +210,34 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  <span id=L class="chip bad">LEFT —</span><span id=R class="chip bad">RIGHT —</span>
  <span id=calib class=chip style="display:none"></span>
  <span style="flex:1"></span>
- <button class=chip style="cursor:pointer;border:0" onclick="setView(-0.66,0.24)">view: behind</button>
- <button class=chip style="cursor:pointer;border:0" onclick="setView(2.48,0.24)">view: front</button>
+ <button class=chip style="cursor:pointer;border:0" onclick="setView(2.48,0.24)">view: behind</button>
+ <button class=chip style="cursor:pointer;border:0" onclick="setView(-0.66,0.24)">view: front</button>
  <button class=chip style="cursor:pointer;border:0" onclick="setView(VIEW_DEFAULT.yaw,VIEW_DEFAULT.pitch)">reset view</button>
  <span class=chip id=age>age —</span>
 </header>
 <div style="display:flex;gap:10px;align-items:center;padding:10px 16px;background:#141925;border-bottom:1px solid #232936;flex-wrap:wrap">
  <button id=btnLive  style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#1e5d3a;color:#fff">&#9654; START LIVE (Quest)</button>
  <button id=btnStop  style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#7c2d2d;color:#fff">&#9632; STOP</button>
+ <button id=btnCalib style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#8a6d1a;color:#fff">&#8853; CALIBRATE</button>
+ <button id=btnCalClear title="clear the applied neutral-pose fit (back to 1:1)" style="cursor:pointer;border:0;border-radius:8px;padding:8px 10px;font-weight:600;background:#3a3f4b;color:#cdd5df;display:none">clear cal</button>
  <span style="width:14px"></span>
  <select id=selRec style="background:#222833;color:#dde3ea;border:1px solid #353c4a;border-radius:8px;padding:7px"></select>
  <label style="color:#9fb2c8;font-size:13px"><input type=checkbox id=chkLoop checked> loop</label>
  <button id=btnReplay style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#2b4a7a;color:#fff">&#9654; REPLAY</button>
  <span id=ctrlStatus style="color:#9fb2c8;font-size:13px;margin-left:8px">…</span>
  <span id=hint style="color:#e8b339;font-size:13px;font-weight:600;margin-left:8px"></span>
+</div>
+<div id=calBanner style="display:none;padding:12px 16px;background:#2b2410;border-bottom:2px solid #d4af37;align-items:center;gap:14px">
+ <span style="font-size:20px">&#129337;</span>
+ <div style="flex:1">
+  <div id=calMsg style="font-weight:700;font-size:15px;color:#f4d97a"></div>
+  <div style="display:flex;gap:14px;align-items:center;margin-top:6px">
+   <span id=calL class=chip>LEFT &mdash;</span><span id=calR class=chip>RIGHT &mdash;</span>
+   <span style="flex:1;height:10px;background:#1a1610;border-radius:5px;overflow:hidden;display:block">
+    <span id=calBar style="display:block;height:100%;width:0%;background:#d4af37;transition:width .15s"></span>
+   </span>
+  </div>
+ </div>
 </div>
 <main>
  <div>
@@ -257,7 +271,10 @@ function Scene(canvas,scale,ctr){
  return s;
 }
 function camOf(s){const cy=Math.cos(VIEW.yaw),sy=Math.sin(VIEW.yaw),cp=Math.cos(VIEW.pitch),sp=Math.sin(VIEW.pitch);
- const fwd=[cp*cy,cp*sy,sp];const right=nrm(cross([0,0,1],fwd));const up=cross(fwd,right);return{right,up,fwd}}
+ // right = fwd × up (RIGHT-handed camera). The old up × fwd basis mirrored every
+ // panel horizontally — anatomically the robot's left arm rendered where its
+ // right should be, so the operator's left hand appeared to drive the right arm.
+ const fwd=[cp*cy,cp*sy,sp];const right=nrm(cross(fwd,[0,0,1]));const up=cross(right,fwd);return{right,up,fwd}}
 function P(s,cam,p){const q=sub(p,s.ctr);
  return{x:s.cv.width/2+dotp(q,cam.right)*s.scale,y:s.cv.height/2-dotp(q,cam.up)*s.scale,d:dotp(q,cam.fwd)}}
 const rgb=c=>`rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
@@ -291,8 +308,10 @@ const TRIAD=[[224,72,72],[60,190,80],[80,110,250]];
 function quat2cols(q){const[w,x,y,z]=q;return[[1-2*(y*y+z*z),2*(x*y+w*z),2*(x*z-w*y)],
  [2*(x*y-w*z),1-2*(x*x+z*z),2*(y*z+w*x)],[2*(x*z+w*y),2*(y*z-w*x),1-2*(x*x+y*y)]]}
 let MESH=null,RIG=null;
-const VIEW={yaw:-0.66,pitch:0.24};                 // ONE camera shared by all panels (GIF default)
-const VIEW_DEFAULT={yaw:-0.66,pitch:0.24};
+// ONE camera shared by all panels. Default = BEHIND the robot (over-the-shoulder
+// embodiment): your left hand drives the arm on the LEFT of the screen.
+const VIEW={yaw:2.48,pitch:0.24};
+const VIEW_DEFAULT={yaw:2.48,pitch:0.24};
 function setView(yaw,pitch){VIEW.yaw=yaw;VIEW.pitch=pitch;}
 // All panels share VIEW (the GIF camera by default). Hands are drawn in the SAME
 // world axes convention as the robot, so the three panels can never disagree.
@@ -402,10 +421,11 @@ function updCtrl(c){
  if(!c)return;
  CTRL=c;
  const el=$('ctrlStatus');
- el.textContent = c.running
+ el.textContent = c.error ? `⚠ ${c.error}`
+   : c.running
    ? `● ${c.mode}${c.record?' — recording '+c.record:''}${c.uptime?'  ('+Math.floor(c.uptime/60)+':'+String(Math.floor(c.uptime%60)).padStart(2,'0')+')':''}`
    : `○ ${c.msg||'stopped'}`;
- el.style.color = c.running ? '#41d98d' : '#9fb2c8';
+ el.style.color = c.error ? '#e8b339' : c.running ? '#41d98d' : '#9fb2c8';
  const sel=$('selRec');
  if(c.recordings && sel.options.length !== c.recordings.length){
   const cur=sel.value; sel.innerHTML='';
@@ -416,6 +436,33 @@ function updCtrl(c){
 $('btnLive').onclick=()=>control({action:'start_live'});
 $('btnStop').onclick=()=>control({action:'stop'});
 $('btnReplay').onclick=()=>{const f=$('selRec').value;if(f)control({action:'start_replay',file:f,loop:$('chkLoop').checked?'1':'0'})};
+let CAL_ACTIVE=false;
+$('btnCalib').onclick=()=>control({action:CAL_ACTIVE?'calibrate_cancel':'calibrate'});
+$('btnCalClear').onclick=()=>control({action:'calibrate_clear'});
+function updCalib(st){
+ const c=st&&st.status?st.status.calib:null, applied=st&&st.status?st.status.calib_applied:null;
+ CAL_ACTIVE=!!(c&&c.active);
+ const btn=$('btnCalib');
+ btn.textContent=CAL_ACTIVE?'✕ CANCEL CAL':'⊕ CALIBRATE';
+ btn.style.background=CAL_ACTIVE?'#7c2d2d':'#8a6d1a';
+ const bn=$('calBanner');
+ if(c&&c.active){
+  bn.style.display='flex';
+  $('calMsg').textContent=c.msg||'';
+  $('calBar').style.width=((c.progress||0)*100).toFixed(0)+'%';
+  for(const[side,id]of[['left','calL'],['right','calR']])
+   chip(id,c[side]?'ok':'bad',(side==='left'?'LEFT ':'RIGHT ')+(c[side]?'✓ in view':'not tracked'));
+ }else bn.style.display='none';
+ // header chip: transient msgs (done/cancelled fade engine-side) or the applied fit
+ const hc=$('calib');
+ if(c&&c.msg&&!c.active){hc.style.display='';hc.className='chip '+(c.phase==='done'?'ok':'warn');hc.textContent=c.msg}
+ else if(applied&&applied.axis_scale){hc.style.display='';hc.className='chip ok';
+  hc.title='body offset [r,u,f]: '+JSON.stringify(applied.body_offset);
+  hc.textContent='CAL ✓ lat ×'+applied.axis_scale[0].toFixed(2)+' / reach ×'+applied.axis_scale[2].toFixed(2)}
+ else if(c&&c.msg){hc.style.display='';hc.className='chip warn';hc.textContent='calib: '+c.msg}
+ else hc.style.display='none';
+ $('btnCalClear').style.display=(applied&&!CAL_ACTIVE)?'':'none';
+}
 function hint(d){
  // First broken link in the chain wins: USB -> engine -> stream -> tracking.
  const live=!CTRL||!CTRL.running||(CTRL.mode||'').startsWith('LIVE');
@@ -444,8 +491,7 @@ async function tick(){
    for(const[side,id]of[['left','L'],['right','R']]){
     const tr=s.status.tracked[side],en=s.status.engaged[side];
     chip(id,tr?(en?'ok':'warn'):'bad',`${id==='L'?'LEFT':'RIGHT'} ${tr?(en?'tracked + engaged':'tracked'):'NO TRACKING'}`)}
-   const c=$('calib');
-   if(s.status.calib&&s.status.calib.msg){c.style.display='';c.className='chip warn';c.textContent='calib: '+s.status.calib.msg}else c.style.display='none';
+   updCalib(s);
    drawHands(s);drawRobot(s,d.mesh_T,d.hand_mesh,d.hand_T);drawOverlay(s,d.mesh_T,d.hand_mesh,d.hand_T);
    $('cardL').innerHTML=card('left',s);$('cardR').innerHTML=card('right',s);
   }
@@ -497,6 +543,10 @@ class EngineManager:
         self.adopted = False
         self.last_msg = "stopped"
         self._lock = threading.Lock()
+        try:                                   # rig override for the control channel
+            self.CONTROL_PORT = int(load_rig().get("vr", {}).get("control_port", 8201))
+        except Exception:
+            pass
         # Adopt a healthy engine that predates this dashboard (restarted mid-
         # session): an engine process exists and the render port answers.
         try:
@@ -512,10 +562,12 @@ class EngineManager:
             pass
 
     # Ports the engine must bind or it comes up as a husk: ORBIT ingest PULLs
-    # (the ingest thread dies on EADDRINUSE) and the render bridges (8101 zmq,
-    # 8102 TCP JSON — 8102 is what this dashboard reads). 8099 (orbit viz) is
+    # (the ingest thread dies on EADDRINUSE), the render bridges (8101 zmq,
+    # 8102 TCP JSON — 8102 is what this dashboard reads), and the engine
+    # control channel (8201, the CALIBRATE button). 8099 (orbit viz) is
     # deliberately absent: the engine runs fine without it.
-    ENGINE_PORTS = (8087, 8088, 8095, 8100, 8101, 8102, 8122, 8123, 8200)
+    ENGINE_PORTS = (8087, 8088, 8095, 8100, 8101, 8102, 8122, 8123, 8200, 8201)
+    CONTROL_PORT = 8201                    # vr.control_port (engine command channel)
     # '[-]m' anchor: matches 'python -m bimanual_teleop.launch.run_teleop' (and
     # the uv wrapper) but not editors holding the source file open.
     ENGINE_PATTERN = r"[-]m bimanual_teleop\.launch\.run_teleop"
@@ -657,6 +709,19 @@ class EngineManager:
                 "msg": self.last_msg,
                 "recordings": [str(Path(r).relative_to(REPO_ROOT)) for r in recs]}
 
+    def engine_cmd(self, cmd: str):
+        """Proxy a runtime command to the live engine's control channel
+        (CALIBRATE etc.) — the engine keeps running, nothing is restarted."""
+        try:
+            from bimanual_teleop.control_server import send_command
+            reply = send_command(cmd, self.CONTROL_PORT)
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            return {"error": f"engine control unreachable ({e}) — is an engine running?",
+                    **self.status()}
+        out = self.status()
+        out["calib_reply"] = reply
+        return out
+
     def dispatch(self, query: dict):
         action = (query.get("action") or [""])[0]
         if action == "start_live":
@@ -668,6 +733,8 @@ class EngineManager:
             return self.start_replay(f, (query.get("loop") or ["0"])[0] == "1")
         if action == "stop":
             return self.stop()
+        if action in ("calibrate", "calibrate_cancel", "calibrate_clear"):
+            return self.engine_cmd(action)
         return self.status()
 
 

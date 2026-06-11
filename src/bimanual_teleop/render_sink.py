@@ -280,6 +280,9 @@ class RenderSink:
             "engaged": {s: bool(engaged.get(s, False)) for s in SIDES},
             "tracked": tracked,
             "calib": engine.calib_status,
+            # Applied neutral-pose fit (additive schema field — Unity's
+            # JsonUtility ignores unknown fields; the dashboard shows a chip).
+            "calib_applied": getattr(engine, "calib_summary", None),
             "hz": float(hz),
         }
         hand_render = {s: ordered_hand_state(self._hand[s]) for s in SIDES}
