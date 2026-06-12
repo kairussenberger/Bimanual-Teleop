@@ -126,12 +126,12 @@ HardwareSink. In order:
    matches the dashboard/sim, speed feels like the shaper cap (`rate_limit` 1.2
    rad/s default — slow), hardstops respected. THIS is the sim→real transfer
    check, with your hand on the e-stop.
-5. **Replay on hardware**: `run_hw --vr replay recordings/roll_right_left.npz`
-   — a curated tape you have already watched in sim (see
-   docs/REPLAY_LIBRARY.md; tapes embed their session calibration), now on
-   metal. No surprises allowed: same motion, slower (derated). Then
-   reach_box.npz, wrist_swing.npz; clap.npz only after the crossing issue is
-   closed.
+5. **Replay on hardware**: `run_hw --vr replay replay_library/roll_right_left.npz`
+   — a curated COMMITTED tape you have already watched in sim (see
+   docs/REPLAY_LIBRARY.md; tapes embed their session calibration, so a fresh
+   clone has them), now on metal. No surprises allowed: same motion, slower
+   (derated). Then reach_box.npz, wrist_swing.npz; clap.npz only after the
+   crossing issue is closed.
 6. **Live teleop, gesture clutch**: `run_hw --vr orbit --clutch gesture`.
    Engage one hand at a time. Verify dropout HOLD by covering a hand; verify
    deadman by un-pinching; verify Ctrl+C releases torque.

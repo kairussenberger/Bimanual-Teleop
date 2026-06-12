@@ -2,8 +2,9 @@
 
 The canonical recordings for the sim→real checklist (ARCHITECTURE.md step 5:
 replay on hardware, "no surprises allowed") and for regression-scoring mapping
-changes. Tapes live in `recordings/` (gitignored — per-machine data); this page
-is the committed record of what they are and what they score.
+changes. The tapes are COMMITTED under `replay_library/` (trimmed + session
+fit embedded — self-contained on any clone); working copies and the untrimmed
+`.raw.npz` originals stay in the gitignored `recordings/`.
 
 Every tape is TRIMMED (the walk-to-the-laptop tail, and pick_place's first
 10 s) and EMBEDS the calibration that ran during its session (`calib_json` in
