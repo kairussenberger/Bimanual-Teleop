@@ -5,6 +5,103 @@ Each entry: what changed, why, and exactly which files were touched.
 
 ---
 
+## 2026-06-12 — anchor-jump guard, fit grading, preflight doctor
+
+Detail-ironing day (no headset). Three pieces, each closing a seam the
+2026-06-11 sessions exposed. 252 tests green (was 209), `verify_stack` passes,
+Unity fixture regenerated twice (status.guard, arms.clamp_dist — both
+additive). NOT yet validated live — first live session should deliberately
+recenter mid-drive and watch the guard trip + recalibrate.
+
+**1. Mid-session anchor-jump guard (`safety/anchor_guard.py`, failsafe 5c).**
+*Why:* the 7th-pass `follow_locked` only guards session START; a recenter,
+ORBIT app restart, or headset sleep mid-session moves the stream anchors and
+the applied fit goes silently wrong — and the existing teleport rejection then
+re-anchors and GLIDES the arms onto the shifted mapping (wrong, smoothly).
+*What:* the guard watches the BODY-RELATIVE wrist signal (downstream of
+whatever `vr.orbit_wrist_anchor` reconstructs — anchors that cancel can never
+false-trip). Channel A: one-sample discontinuity beyond
+`jump_m + speed_allow·dt` → side SUSPECT (arm holds, mapper fed nothing);
+snap-back within `return_tol` = glitch → resume; persistence
+`confirm_frames` → verdict via the OTHER hand (shared stream anchor): coherent
+both-hand jump or other-hand-untracked → TRIP; other hand steady → accept
+(same policy as teleport rejection). Channel B (live transports only): whole
+stream dead > `blackout_s` → TRIP (app restart/sleep reset anchors — and
+previously resumed silently on the stale fit!). TRIP = `follow_locked`,
+in-flight capture CANCELLED (poses straddling an anchor change must not fit),
+persistent dashboard/in-headset banner; only a completed calibration (which
+absorbs the new anchors) unlocks + resets. Re-trips re-fire the response (a
+jump during the post-trip recapture must cancel THAT too). Thresholds sized
+from 19 real recordings: normal per-frame deltas p99 < 3 cm @ ~9 ms; *one-frame
+0.2–1.5 m glitch teleports appear in MOST sessions* (why single-hand jumps must
+never trip alone); benign stream hiccups ≤ 0.9 s, real blackouts 6 s / 31 s
+(why `blackout_s: 2.0` separates cleanly). Duplicate frames (latest() repeats)
+are skipped — confirm counts run on real samples, not engine ticks.
+Config `safety.anchor_guard.*` in rig.yaml. Engine: samples hoisted in tick(),
+`_guard_tick` before capture/plan paths, guard armed when following OR
+capturing, reset inside `_apply_calibration`. `status.guard` published;
+dashboard shows the red trip banner + `⚠ TRACKING TRIP` chip.
+
+**2. Calibration fit grading + live WS-clamp indicator.**
+*Why:* the 9th-pass broken fit was only diagnosable by evening forensics on a
+recording; a bad fit must announce itself at completion, and a stale one must
+show up while driving.
+*What:* `fit_two_pose` now grades itself through EXACTLY the runtime map —
+`lateral_curve` extracted from `ClutchMapper._lat_scaled` (one implementation,
+shared): per-side neutral residual (3D) and rest residual (up/forward only —
+the lateral map is anchored at clap width + extended spread, rest width is
+outside its claim), plus raw-scale clip detection. `quality` =
+grade good/check/bad + named reasons + residual table, persisted in the calib
+JSON meta, in `summary()` → dashboard CAL chip (colour + `±worst cm`, reasons
+in tooltip) and the completion banner. Validated on the REAL 2026-06-11
+capture: refit reproduces the famous −2.191 m offset, capture grades GOOD at
+2.3 cm worst (the capture WAS good — the clip was the bug); the old clipped
+parameters would have screamed BAD at 139 cm in the banner. Live signal:
+`ArmController.plan` publishes `clamp_dist` (how far the raw mapped target sat
+OUTSIDE the workspace box — a broken mapping pins targets at a box face, it
+never just "feels far"); dashboard shows a per-arm row + a sustained-EMA red
+`WS CLAMP — mapping off? recalibrate` header chip.
+
+**3. Preflight doctor (`scripts/doctor.py`).**
+*Why:* 06-11 lost ~30 min to a 4-day-old `orbit_to_unity.py` squatting all
+seven ORBIT ports, and twice to wedged ffmpeg screen-captures (zero frames, no
+error).
+*What:* report → `--fix` → `--json`; exit 1 on failures. Checks: stray
+processes (old bridge = always fail; ffmpeg avfoundation with no live
+headset_view; engines > 12 h = orphans), foreign listeners on the teleop ports
+(reported, NEVER auto-killed — `--fix` only signals OUR OWN tooling patterns,
+INT before KILL so engines save recordings), adb state + missing reverse
+tunnels (fixable; matters for an already-running engine), persisted-calib
+load-screen + grade + age, the PROVEN iCloud venv trap (Mobile Documents path
+or UF_HIDDEN .pth → CPython ≥3.12 skips them), recordings disk usage.
+README gains step-0 preflight + operator notes for the guard/grades.
+
+**Files.** NEW: `src/bimanual_teleop/safety/anchor_guard.py`,
+`scripts/doctor.py`, `tests/test_anchor_guard.py` (17),
+`tests/test_calib_quality.py` (6), `tests/test_doctor.py` (20).
+TOUCHED: `engine.py` (guard wiring, `_neutral_tick(wb,…)` signature),
+`vr/frames.py` (`lateral_curve` extraction), `vr/neutral_calib.py`
+(`_fit_quality`, summary, banner msg), `arms/arm_control.py` (`clamp_dist`),
+`render_sink.py` (`status.guard`, `arms.*.clamp_dist`), `scripts/dashboard.py`
+(trip banner/chip, CAL grade chip, WS CLAMP chip + card row),
+`config/rig.yaml` (`safety.anchor_guard`), `.gitignore`
+(`operator_calib.json.*` — the .bak forensics copy escaped the pattern),
+`tests/test_neutral_calib.py` (guard disabled in the teleporting-fixture
+capture test), README, ARCHITECTURE (failsafe 5c + tooling rows), Unity
+fixture.
+
+**Behavioral notes.**
+- Replaying a recording that CONTAINS an anchor jump now locks follow at the
+  jump (correct mirror of live). For deliberate glitch studies:
+  `safety.anchor_guard.enabled: false`.
+- `--vr fake` never trips (synthetic motion is smooth, fake/replay exempt from
+  the blackout channel).
+- Parked for later (from the priorities discussion): finger retargeting
+  quality grading (#3), curated hardware-day replay library (#5), latency
+  instrumentation.
+
+---
+
 ## 2026-06-11 (9th pass) — headset view WORKS + the floating-arms calibration bug
 
 **Why (headset view).** The 8th-pass stream decoded but was unusable in the
