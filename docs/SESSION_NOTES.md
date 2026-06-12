@@ -5,6 +5,56 @@ Each entry: what changed, why, and exactly which files were touched.
 
 ---
 
+## 2026-06-12 (afternoon) — replay library shipped, clasp crossing fixed, fingers forensics
+
+Live session day (first with the morning's guard/grading/doctor). 262 tests.
+
+**Replay library** (`replay_library/`, committed, 34 MB; docs/REPLAY_LIBRARY.md
+pins scores): six probe tapes recorded via dashboard sessions, trimmed
+(`scripts/trim_session.py`), each EMBEDDING its session's calibration
+(`calib_json` in the npz; recorder/replay/engine/analyze all wired) — anchors
+moved ~1 m BETWEEN consecutive sessions, so a tape without its fit is
+meaningless (reach_box scored 77 cm phantom error through identity, 1.0 cm
+through its own fit). run_teleop now embeds automatically at save.
+
+**Clasp crossing FIXED** (user report, live): clap.npz dissection showed 48%
+of separation pushes were majority fore/aft SHEAR (closest-point axis at
+fingertip-vs-palm for near-parallel staggered capsules) — the hands slid past
+each other. separate_capsules blends the push axis to the WRIST LINE as axes
+approach (anti-)parallel (λ=|cos|), magnitude scaled by the gradient
+component; perpendicular pokes keep the gradient. Tape re-dissect: 0%
+majority-shear, 0 direction flips.
+
+**Fingers/“right wrist moves too much” forensics**: split into (a) an ANALYZER
+artifact — it scored through the LIVE head frame while the engine maps through
+the LOCKED yaw; fixed → pick_place/reach_box/clap became clean PASSes
+(1.3°/1.4°/0.7° median — real manipulation tracking was always fine); and
+(b) a REAL tracker limitation — sustained finger articulation makes the
+whole-hand hypothesis wander (slow 120–160° attitude swings + ~0.5 m drift,
+coherent across landmarks AND wrist stream → uncatchable by cross-checks;
+engine faithfully danced: j5/j6 450–1000° cumulative on a parked-arms tape).
+Remedy = operational: dashboard START LIVE gained a clutch selector
+(always | gesture); finger-only work runs on the gesture deadman.
+
+**Anchor guard validated live, organically**: the abandoned 11:11 session =
+the user RECENTERED mid-calibration → guard tripped ("both wrists jumped
+together (1.46 m)"), capture cancelled, arms locked — exactly as designed.
+Offline replay of that tape reproduces the same trip deterministically. The
+user read it as "reanchoring the hands did not work": recenter is NOT a
+re-zero mechanism — the 3-pose recalibration is (the banner says so). Note
+the CALIBRATE-button toggle (press-again = CANCEL) likely ate the two
+follow-up capture attempts that session. Still to do live: a trip while
+DRIVING (the 11:11 trip fired while locked-but-capturing), plus the
+occlusion-no-trip and sloppy-calibration probes, engage_cycles tape.
+
+Also: dashboard page-bricking JS SyntaxError fixed mid-morning (a Python-
+interpreted \n inside the new CAL-chip tooltip killed the whole inline script
+— every button dead while the server was healthy; node --check now pins the
+page in CI), and a headset_view ops note: the startup reaper kills the
+PREVIOUS instance's ffmpeg — one instance at a time, last one wins.
+
+---
+
 ## 2026-06-12 — anchor-jump guard, fit grading, preflight doctor
 
 Detail-ironing day (no headset). Three pieces, each closing a seam the
