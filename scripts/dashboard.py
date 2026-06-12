@@ -218,6 +218,10 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
 </header>
 <div style="display:flex;gap:10px;align-items:center;padding:10px 16px;background:#141925;border-bottom:1px solid #232936;flex-wrap:wrap">
  <button id=btnLive  style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#1e5d3a;color:#fff">&#9654; START LIVE (Quest)</button>
+ <select id=selClutch title="always: arms follow whenever tracked. gesture: arms follow ONLY while you hold the thumb-pinky pinch (deadman) — use for finger-only work so parked means parked" style="background:#222833;color:#dde3ea;border:1px solid #353c4a;border-radius:8px;padding:7px">
+  <option value=always selected>clutch: always</option>
+  <option value=gesture>clutch: gesture</option>
+ </select>
  <button id=btnStop  style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#7c2d2d;color:#fff">&#9632; STOP</button>
  <button id=btnCalib style="cursor:pointer;border:0;border-radius:8px;padding:8px 18px;font-weight:700;background:#8a6d1a;color:#fff">&#8853; CALIBRATE</button>
  <button id=btnCalClear title="clear the applied neutral-pose fit (back to 1:1)" style="cursor:pointer;border:0;border-radius:8px;padding:8px 10px;font-weight:600;background:#3a3f4b;color:#cdd5df;display:none">clear cal</button>
@@ -436,7 +440,7 @@ function updCtrl(c){
   if(cur)sel.value=cur;
  }
 }
-$('btnLive').onclick=()=>control({action:'start_live'});
+$('btnLive').onclick=()=>control({action:'start_live',clutch:$('selClutch').value});
 $('btnStop').onclick=()=>control({action:'stop'});
 $('btnReplay').onclick=()=>{const f=$('selRec').value;if(f)control({action:'start_replay',file:f,loop:$('chkLoop').checked?'1':'0'})};
 let CAL_ACTIVE=false;
@@ -689,9 +693,11 @@ class EngineManager:
             self._spawn(args, mode, record)
             return self.status()
 
-    def start_live(self):
+    def start_live(self, clutch: str = "always"):
+        clutch = clutch if clutch in ("always", "gesture") else "always"
         rec = f"recordings/live_{time.strftime('%m%d_%H%M%S')}.npz"
-        return self._start(["--vr", "orbit", "--clutch", "always", "--record", rec], "LIVE", rec)
+        return self._start(["--vr", "orbit", "--clutch", clutch, "--record", rec],
+                           f"LIVE ({clutch})", rec)
 
     def start_replay(self, file: str, loop: bool):
         args = ["--vr", "replay", file] + (["--loop"] if loop else [])
@@ -752,7 +758,7 @@ class EngineManager:
     def dispatch(self, query: dict):
         action = (query.get("action") or [""])[0]
         if action == "start_live":
-            return self.start_live()
+            return self.start_live((query.get("clutch") or ["always"])[0])
         if action == "start_replay":
             f = (query.get("file") or [""])[0]
             if not f or not (REPO_ROOT / f).exists():

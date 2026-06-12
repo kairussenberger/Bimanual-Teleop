@@ -115,12 +115,24 @@ def main() -> int:
         hs = frame.hands.get(side)
         if frame.head is None or hs is None or not hs.tracked:
             continue
+        # Score in the SAME body frame the engine maps in: the LOCKED session
+        # yaw (vr.body_yaw: locked, the default). Using the live head here
+        # mis-scored every session where the operator looked around — the
+        # prediction rotated with the head while the command (correctly)
+        # did not (measured: a fingers session with the head wandering the
+        # full circle scored 71° of phantom orientation error).
+        if getattr(engine, "_yaw_R", None) is not None:
+            T = np.eye(4)
+            T[:3, :3] = engine._yaw_R
+            op_axes_now = head_op_axes(T)
+        else:
+            op_axes_now = head_op_axes(frame.head)
         if m.anchor_ctrl is not None and m.anchor_ctrl is not prev_anchor_obj:
             prev_anchor_obj = m.anchor_ctrl
             anchor = {
                 "raw_R": np.asarray(hs.wrist, float)[:3, :3].copy(),
                 "raw_p": np.asarray(hs.wrist, float)[:3, 3].copy(),
-                "op_axes": head_op_axes(frame.head),
+                "op_axes": op_axes_now,
                 "ee_R": m.anchor_ee.rotation().as_matrix(),
                 "ee_p": m.anchor_ee.translation(),
                 "t": float(t[i]),
@@ -165,11 +177,11 @@ def main() -> int:
             abs_ori_err = float(np.degrees(np.linalg.norm(rotvec(pred_abs.T @ arm.cmd_R))))
 
         # --- translation ------------------------------------------------------- #
-        # Body-frame torso→wrist vector, recomputed the same way
-        # body_relative_hand_sample does; compared post-hoc via windowed deltas so
-        # the scoring works for both 'absolute' (with its engage glide) and
-        # 'relative' position modes.
-        op_axes = head_op_axes(frame.head)
+        # Body-frame torso→wrist vector, recomputed the same way the ENGINE's
+        # _arm_hand_sample does: LOCKED yaw axes, live head position; compared
+        # post-hoc via windowed deltas so the scoring works for both 'absolute'
+        # (with its engage glide) and 'relative' position modes.
+        op_axes = op_axes_now
         torso_w = frame.head[:3, 3] + op_axes @ np.asarray(rig["vr"]["torso_from_head"], float)
         ctrl_p = op_axes.T @ (W[:3, 3] - torso_w)
         cmd_w = base_R @ arm.cmd_pos + np.asarray(rig["arms"][side]["base_pos"], float)
