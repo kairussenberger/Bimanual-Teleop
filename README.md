@@ -176,6 +176,10 @@ fake, replay, live Quest, jog, and hardware sessions.
 Uses the **ORBIT** native Quest app (`com.ORBIT.Teleoperation`) streaming hand
 tracking over USB.
 
+0. **Preflight** (optional but it has paid for itself): `uv run python
+   scripts/doctor.py --fix` — kills stray engines / the retired Unity bridge /
+   wedged screen-capture ffmpegs, checks teleop ports for squatters, the Quest
+   link + reverse tunnels, and the persisted calibration's grade and age.
 1. Install ORBIT on the Quest, connect USB, allow the connection on-device.
    `adb devices` must list the headset (the launcher sets up all `adb reverse`
    port forwards itself).
@@ -196,6 +200,10 @@ tracking over USB.
    at shoulder height.** The extended pose is LAST on purpose — it maps onto
    the robot's neutral, so when the fit completes the arms engage and **glide**
    (≈1 s, never snaps) onto the correspondence you are already holding.
+   The completion banner grades the fit (GOOD/CHECK/BAD + worst residual);
+   anything but GOOD: just recalibrate. If the anchors move MID-session
+   (recenter, ORBIT restart, headset sleep) the anchor guard locks the arms
+   and the banner says RECALIBRATE — same three poses, ~8 seconds.
 5. The fit is POSITION-only (your hand spacing → robot hand spacing, your reach
    → robot reach, your clap → the robot's hands touching); it persists per
    machine (`config/operator_calib.json`) and `clear cal` discards it.

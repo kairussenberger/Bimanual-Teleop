@@ -99,6 +99,7 @@ bound *how fast anything can physically move* no matter what upstream does.
 | Need | Command |
 |------|---------|
 | Full hardware-free acceptance gate | `uv run python scripts/verify_stack.py` |
+| Preflight doctor (strays, ports, quest link, calib grade/age, iCloud-venv trap) | `uv run python scripts/doctor.py [--fix]` |
 | Live dashboard (status, 3D, joint angles) | `uv run python scripts/dashboard.py` → http://127.0.0.1:8180 |
 | Keyboard jog (sim→real verification) | `uv run python scripts/jog_arms.py [--sink hw]` |
 | Record a headset session | `run_teleop --vr orbit --record recordings/s.npz` |
