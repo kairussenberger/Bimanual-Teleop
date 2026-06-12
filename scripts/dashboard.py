@@ -442,6 +442,7 @@ $('btnCalClear').onclick=()=>control({action:'calibrate_clear'});
 function updCalib(st){
  const c=st&&st.status?st.status.calib:null, applied=st&&st.status?st.status.calib_applied:null;
  const locked=!!(st&&st.status&&st.status.follow_locked);
+ const g=st&&st.status?st.status.guard:null, tripped=!!(g&&g.tripped);
  CAL_ACTIVE=!!(c&&c.active);
  const btn=$('btnCalib');
  btn.textContent=CAL_ACTIVE?'✕ CANCEL CAL':'⊕ CALIBRATE';
@@ -450,18 +451,23 @@ function updCalib(st){
  if(c&&c.active){
   bn.style.display='flex';
   $('calMsg').textContent=c.msg||'';
+  $('calMsg').style.color='';
   $('calBar').style.width=((c.progress||0)*100).toFixed(0)+'%';
   for(const[side,id]of[['left','calL'],['right','calR']])
    chip(id,c[side]?'ok':'bad',(side==='left'?'LEFT ':'RIGHT ')+(c[side]?'✓ in view':'not tracked'));
  }else if(locked){
   bn.style.display='flex';
-  $('calMsg').textContent='ARMS LOCKED — press ⊕ CALIBRATE and follow the 3 poses to enable control (required each session)';
+  $('calMsg').textContent=tripped
+   ?'⚠ '+((c&&c.phase==='tripped'&&c.msg)||('TRACKING JUMPED — '+((g&&g.reason)||'anchor changed')+'. Recalibrate to resume.'))
+   :'ARMS LOCKED — press ⊕ CALIBRATE and follow the 3 poses to enable control (required each session)';
+  $('calMsg').style.color=tripped?'#ff8a8a':'';
   $('calBar').style.width='0%';
   chip('calL','warn','LEFT —');chip('calR','warn','RIGHT —');
  }else bn.style.display='none';
  // header chip: transient msgs (done/cancelled fade engine-side) or the applied fit
  const hc=$('calib');
- if(c&&c.msg&&!c.active){hc.style.display='';hc.className='chip '+(c.phase==='done'?'ok':'warn');hc.textContent=c.msg}
+ if(c&&c.phase==='tripped'&&!c.active){hc.style.display='';hc.className='chip bad';hc.textContent='⚠ TRACKING TRIP'+(g&&g.trips>1?' ×'+g.trips:'')}
+ else if(c&&c.msg&&!c.active){hc.style.display='';hc.className='chip '+(c.phase==='done'?'ok':'warn');hc.textContent=c.msg}
  else if(applied&&applied.axis_scale){hc.style.display='';hc.className='chip ok';
   hc.title='body offset [r,u,f]: '+JSON.stringify(applied.body_offset);
   hc.textContent='CAL ✓ lat ×'+applied.axis_scale[0].toFixed(2)+' / reach ×'+applied.axis_scale[2].toFixed(2)}

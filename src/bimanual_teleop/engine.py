@@ -39,6 +39,7 @@ import numpy as np
 from .arms.arm_control import ArmController
 from .config import REPO_ROOT, SIDES
 from .hands.hand_control import HandController
+from .safety.anchor_guard import AnchorGuard
 from .safety.separation import separate_capsules
 from .vr.calibrate import (Calibrator, R_base_from_body, body_relative_hand_sample,
                            head_op_axes)
@@ -72,6 +73,11 @@ class TeleopEngine:
         # --- operator neutral-pose calibration (position-only, runtime) ----- #
         self.neutral = NeutralPoseCalibration(rig)
         self.calib_summary: dict | None = None     # applied scale/offset, for the dashboard chip
+        # SAFETY — mid-session anchor-jump guard (safety/anchor_guard.py): a
+        # recenter/app-restart/headset-sleep moves the stream anchors and makes
+        # the applied fit silently wrong. Constructed BEFORE the auto-load below
+        # (_apply_calibration resets it).
+        self.guard = AnchorGuard(rig)
         self._calib_file = self._resolve_calib_path(rig)
         self._req_calib = False                    # set from the control-server thread,
         self._req_calib_cancel = False             # consumed by tick() on the control loop
@@ -108,8 +114,15 @@ class TeleopEngine:
         if not self.calibrated:
             self._calibration_tick(frame, t)
             return
+        samples = {s: self._arm_hand_sample(frame.hands.get(s) if frame else None, frame)
+                   for s in SIDES}
+        wb = {s: self._wrist_body_pos(samples[s]) for s in SIDES}
+        holds = self._guard_tick(wb, frame, t)
         if self.neutral.active:
-            self._neutral_tick(frame, t)
+            # Suspect sides feed the capture nothing (a glitch sample would only
+            # reset the stillness window, but why let it in at all).
+            self._neutral_tick({s: (None if holds.get(s) else wb[s]) for s in SIDES},
+                               frame, t)
             return
         # Keep the "CALIBRATED ✓" banner up briefly, then clear it.
         if self.calib_status is not None:
@@ -117,13 +130,49 @@ class TeleopEngine:
                 self.calib_status = None
         plans = {}
         for s in SIDES:
-            hs = frame.hands.get(s) if frame else None
             follow = engaged.get(s, False) and not self.follow_locked
-            plans[s] = self.arm[s].plan(self._arm_hand_sample(hs, frame), follow, t)
+            # A guard HOLD feeds the mapper nothing: the arm parks for the few
+            # confirm frames (glitch) or until the trip locks follow (anchor).
+            plans[s] = self.arm[s].plan(None if holds.get(s) else samples[s], follow, t)
         self._separate_hands(plans)
         for s in SIDES:
             self.sink.set_arm(s, self.arm[s].commit(plans[s], t))
             self.sink.set_hand(s, self.hand[s].update(frame.hands.get(s) if frame else None, t))
+
+    # ---- anchor-jump guard -------------------------------------------------- #
+    @staticmethod
+    def _wrist_body_pos(hs: HandSample | None) -> np.ndarray | None:
+        """Body-relative wrist position for the guard, or None when unusable."""
+        if hs is None or not hs.tracked:
+            return None
+        W = np.asarray(hs.wrist, dtype=float)
+        if W.shape != (4, 4) or not np.all(np.isfinite(W[:3, 3])):
+            return None
+        return W[:3, 3]
+
+    def _guard_tick(self, wb: dict[str, np.ndarray | None], frame: VRFrame | None,
+                    t: float) -> dict[str, bool]:
+        if not self.guard.enabled:
+            return {s: False for s in SIDES}
+        fresh = frame is not None and (frame.head is not None
+                                       or any(h is not None and h.tracked
+                                              for h in (frame.hands or {}).values()))
+        # Armed whenever a trip would protect something: arms following, or a
+        # capture in flight (poses straddling an anchor change must not be fit).
+        armed = (not self.follow_locked) or self.neutral.active
+        holds = self.guard.observe(wb, fresh, t, armed=armed)
+        if self.guard.take_trip():
+            reason = self.guard.trip_reason or "tracking anchor changed"
+            self.follow_locked = True              # only a fresh calibration unlocks
+            if self.neutral.active:
+                self.neutral.cancel("tracking jumped mid-capture — recalibrate from the start")
+            self._done_t = None                    # banner stays until recalibration
+            self.calib_status = {"active": False, "kind": "guard", "phase": "tripped",
+                                 "progress": 0.0, "remaining": 0.0,
+                                 "left": False, "right": False,
+                                 "msg": f"TRACKING JUMPED — {reason}. Recalibrate to resume."}
+            print(f"[guard] TRIP: {reason} — arms locked until recalibration", flush=True)
+        return holds
 
     # ---- pairwise hand separation ----------------------------------------- #
     def _separate_hands(self, plans: dict[str, dict | None]) -> None:
@@ -194,6 +243,10 @@ class TeleopEngine:
                                                getattr(res, "lat_center", 0.0),
                                                getattr(res, "lat_knots", None))
         self.calib_summary = res.summary()
+        # The fit absorbs whatever the anchors are NOW — forgive any latched
+        # trip and reseed continuity (the yaw re-latch that may follow changes
+        # the body axes under the watched signal).
+        self.guard.reset()
         print(f"[calib] {announce}: axis_scale={np.round(res.axis_scale, 3).tolist()} "
               f"body_offset={np.round(res.body_offset, 3).tolist()}", flush=True)
 
@@ -241,22 +294,16 @@ class TeleopEngine:
                 print("[calib] neutral-pose capture started — relax both arms down "
                       "at your sides and hold still", flush=True)
 
-    def _neutral_tick(self, frame: VRFrame | None, t: float) -> None:
+    def _neutral_tick(self, wb: dict[str, np.ndarray | None], frame: VRFrame | None,
+                      t: float) -> None:
         """One capture tick: arms FREEZE at their current pose, fingers keep
-        tracking, the state machine eats body-relative wrist samples."""
-        samples: dict[str, np.ndarray | None] = {}
+        tracking, the state machine eats body-relative wrist samples (the same
+        vectors the anchor guard watched this tick)."""
         for s in SIDES:
             hs_raw = frame.hands.get(s) if frame else None
-            hs = self._arm_hand_sample(hs_raw, frame)
-            w = None
-            if hs is not None and hs.tracked:
-                W = np.asarray(hs.wrist, dtype=float)
-                if W.shape == (4, 4) and np.all(np.isfinite(W[:3, 3])):
-                    w = W[:3, 3]
-            samples[s] = w
             self.sink.set_arm(s, self.arm[s].ik.q)                  # hold current pose
             self.sink.set_hand(s, self.hand[s].update(hs_raw, t))   # fingers can track meanwhile
-        self.neutral.tick(samples, t)
+        self.neutral.tick(wb, t)
         self.calib_status = self.neutral.status(t)
         if self.neutral.phase == "done" and self.neutral.result is not None:
             res = self.neutral.result

@@ -394,6 +394,10 @@ def test_engine_capture_freezes_arms_applies_and_persists(tmp_path):
     rig = load_rig()
     calib_path = tmp_path / "operator_calib.json"
     rig["mapping"]["calib_file"] = str(calib_path)
+    # This fixture TELEPORTS between poses (real operators glide); the anchor
+    # guard would rightly read that as an anchor event. Capture mechanics are
+    # the subject here — guard/capture interplay is pinned in test_anchor_guard.
+    rig["safety"]["anchor_guard"] = {"enabled": False}
     sink = DummySink()
     eng = TeleopEngine(rig, sink)
     assert eng.calib_summary is None

@@ -169,6 +169,23 @@ safety:
   target_speed_max: 0.8
   target_jump_speed: 3.0
   target_ang_speed_max: 2.5
+  # Mid-session ANCHOR-JUMP guard (safety/anchor_guard.py): a recenter, app
+  # restart, or headset sleep moves the ORBIT stream anchors and silently
+  # invalidates the applied calibration — the guard watches the body-relative
+  # wrist signal for coherent discontinuities and a dead stream, locks follow,
+  # and demands a recalibration. Thresholds sized from 19 real sessions
+  # (2026-06-11): normal per-frame deltas p99 < 3 cm; one-frame tracking
+  # glitches of 0.2–1.5 m are common (absorbed by confirm_frames + the
+  # other-hand cross-check); benign stream hiccups measured ≤ 0.9 s.
+  anchor_guard:
+    enabled: true
+    jump_m: 0.25            # one-sample discontinuity beyond this + speed_allow*dt = suspect
+    speed_allow: 4.0        # m/s honest-motion allowance (scales with the sample gap)
+    confirm_frames: 3       # consecutive far samples to confirm (~27 ms at 110 Hz)
+    return_tol: 0.10        # m — snap back within this of pre-jump = glitch, resume
+    coherence_tol: 0.15     # m — both-side jump similarity = shared-anchor event
+    max_sample_gap_s: 0.3   # continuity expires across longer per-side gaps (dropout)
+    blackout_s: 2.0         # live transports: whole stream dead this long → trip
   # Attitude low-pass time constant (s): raw Quest wrist quats carry ~200°/s of
   # high-frequency jitter (worse when the palm rotates away from the cameras);
   # the commanded attitude slerps toward the demand with this τ. 0 disables.

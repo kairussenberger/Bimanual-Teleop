@@ -80,6 +80,7 @@ degrees (never goes through arm IK).
 | 4 | Latched e-stop | supervisor | zeros engagement until deliberate `reset()`; run_hw releases torque on exit | same |
 | 5 | Fail-closed parsing | sources + calibrate | malformed/non-finite poses, missing head ⇒ hand reads UNTRACKED, never identity/raw fallback | pipeline gating tests |
 | 5b | Yaw-latch guard | `engine.py` `_head_latchable` | NaN warm-up / looking-straight-down head samples never latch the session yaw frame (would poison every body-relative sample); fail closed until a sane head arrives | `test_engine_yaw_latch_skips_degenerate_head_samples` |
+| 5c | **Anchor-jump guard** | `safety/anchor_guard.py` via `engine.py` | mid-session recenter / app restart / headset sleep moves the ORBIT stream anchors ⇒ the applied calibration is silently wrong. Coherent both-wrist discontinuity (or one wrist with the other untracked), and a > `blackout_s` stream blackout, LOCK follow + banner RECALIBRATE; single-hand glitches (common, measured 0.2–1.5 m) hold ≤ `confirm_frames` then resume, never trip | `tests/test_anchor_guard.py` (17 tests) |
 | 6 | Engage glide | `ClutchMapper` | target equals current EE at engage; absolute correspondence reached over `engage_blend_s` | `test_absolute_position_glides_to_chest_correspondence` |
 | 7 | Workspace box | `arm_control.py` | EE targets clamped to `safety.workspace` (base frame) | motion tests |
 | 8 | Anti-cross guard | `arm_control.py` | each hand pinned to its own side of world-Y ⇒ arms can never collide at the midline | `test_calibration_aligns_forward_and_no_cross` |

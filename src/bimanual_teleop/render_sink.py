@@ -292,6 +292,10 @@ class RenderSink:
             # SAFETY state: live transports hold the arms until an in-session
             # calibration completes (additive field; Unity ignores it).
             "follow_locked": bool(getattr(engine, "follow_locked", False)),
+            # Anchor-jump guard state (additive field): trips/holds/reason for
+            # the dashboard banner and post-session forensics.
+            "guard": (engine.guard.status()
+                      if getattr(engine, "guard", None) is not None else None),
             "hz": float(hz),
         }
         hand_render = {s: ordered_hand_state(self._hand[s]) for s in SIDES}

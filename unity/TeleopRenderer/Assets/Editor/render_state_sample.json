@@ -463,6 +463,16 @@
       "right": true
     },
     "follow_locked": false,
+    "guard": {
+      "enabled": true,
+      "holds": {
+        "left": false,
+        "right": false
+      },
+      "reason": null,
+      "tripped": false,
+      "trips": 0
+    },
     "hz": 100.0,
     "tracked": {
       "left": true,
