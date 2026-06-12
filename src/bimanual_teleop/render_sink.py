@@ -272,6 +272,10 @@ class RenderSink:
                 "cmd_pos": cmd_pos,
                 "cmd_quat": cmd_quat,
                 "margins": ac.ik.limit_margins(self._arm[s]).tolist(),
+                # Pre-clamp target excess outside the workspace box (m) —
+                # sustained values = the mapping/calibration is off (additive
+                # field; the dashboard turns it into the WS CLAMP indicator).
+                "clamp_dist": round(float(getattr(ac, "clamp_dist", 0.0)), 4),
             }
         op_state = operator_debug_state(frame, self._torso_from_head,
                                         getattr(engine, "_yaw_R", None))

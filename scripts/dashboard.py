@@ -209,6 +209,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>bimanual-teleo
  <span id=conn class="chip bad">stream …</span><span id=hz class=chip>— Hz</span>
  <span id=L class="chip bad">LEFT —</span><span id=R class="chip bad">RIGHT —</span>
  <span id=calib class=chip style="display:none"></span>
+ <span id=wsclamp class=chip style="display:none"></span>
  <span style="flex:1"></span>
  <button class=chip style="cursor:pointer;border:0" onclick="setView(2.48,0.24)">view: behind</button>
  <button class=chip style="cursor:pointer;border:0" onclick="setView(-0.66,0.24)">view: front</button>
@@ -413,6 +414,8 @@ function card(side,s){
  const wp=a.wrist_pos||a.ee_pos;
  if(a.cmd_pos&&wp){const e=Math.hypot(...[0,1,2].map(k=>a.cmd_pos[k]-wp[k]));
   h+=`<div class=kv><span>wrist target gap</span><b class="${e<0.05?'err-ok':'err-bad'}">${(e*100).toFixed(1)} cm</b></div>`}
+ if(a.clamp_dist!=null&&a.clamp_dist>0.005)
+  h+=`<div class=kv><span>target outside workspace</span><b class="${a.clamp_dist>0.02?'err-bad':'err-ok'}">${(a.clamp_dist*100).toFixed(1)} cm</b></div>`;
  return h}
 function chip(id,cls,txt){const e=$(id);e.className='chip '+cls;e.textContent=txt}
 async function control(params){try{const r=await fetch('/control?'+new URLSearchParams(params));updCtrl(await r.json())}catch(e){}}
@@ -437,6 +440,7 @@ $('btnLive').onclick=()=>control({action:'start_live'});
 $('btnStop').onclick=()=>control({action:'stop'});
 $('btnReplay').onclick=()=>{const f=$('selRec').value;if(f)control({action:'start_replay',file:f,loop:$('chkLoop').checked?'1':'0'})};
 let CAL_ACTIVE=false;
+let WSEMA={left:0,right:0};
 $('btnCalib').onclick=()=>control({action:CAL_ACTIVE?'calibrate_cancel':'calibrate'});
 $('btnCalClear').onclick=()=>control({action:'calibrate_clear'});
 function updCalib(st){
@@ -468,9 +472,13 @@ function updCalib(st){
  const hc=$('calib');
  if(c&&c.phase==='tripped'&&!c.active){hc.style.display='';hc.className='chip bad';hc.textContent='⚠ TRACKING TRIP'+(g&&g.trips>1?' ×'+g.trips:'')}
  else if(c&&c.msg&&!c.active){hc.style.display='';hc.className='chip '+(c.phase==='done'?'ok':'warn');hc.textContent=c.msg}
- else if(applied&&applied.axis_scale){hc.style.display='';hc.className='chip ok';
-  hc.title='body offset [r,u,f]: '+JSON.stringify(applied.body_offset);
-  hc.textContent='CAL ✓ lat ×'+applied.axis_scale[0].toFixed(2)+' / reach ×'+applied.axis_scale[2].toFixed(2)}
+ else if(applied&&applied.axis_scale){
+  const q=applied.quality||null,gr=q?q.grade:null;
+  hc.style.display='';hc.className='chip '+(gr==='bad'?'bad':gr==='check'?'warn':'ok');
+  hc.title='body offset [r,u,f]: '+JSON.stringify(applied.body_offset)
+    +(q&&q.reasons&&q.reasons.length?'\nfit: '+q.reasons.join('; '):'');
+  hc.textContent='CAL '+(gr==='bad'?'✗':gr==='check'?'⚠':'✓')+' lat ×'+applied.axis_scale[0].toFixed(2)
+    +' / reach ×'+applied.axis_scale[2].toFixed(2)+(q&&q.worst_cm!=null?' · ±'+q.worst_cm+'cm':'')}
  else if(c&&c.msg){hc.style.display='';hc.className='chip warn';hc.textContent='calib: '+c.msg}
  else hc.style.display='none';
  $('btnCalClear').style.display=(applied&&!CAL_ACTIVE)?'':'none';
@@ -503,6 +511,13 @@ async function tick(){
    for(const[side,id]of[['left','L'],['right','R']]){
     const tr=s.status.tracked[side],en=s.status.engaged[side];
     chip(id,tr?(en?'ok':'warn'):'bad',`${id==='L'?'LEFT':'RIGHT'} ${tr?(en?'tracked + engaged':'tracked'):'NO TRACKING'}`)}
+   // sustained workspace clamping = the mapping/calibration is off (EMA ~1s)
+   for(const side of['left','right']){const a=s.arms?s.arms[side]:null;
+    WSEMA[side]=0.95*WSEMA[side]+0.05*((a&&a.clamp_dist>0.02)?1:0)}
+   const wsworst=Math.max(WSEMA.left,WSEMA.right),wc=$('wsclamp');
+   if(wsworst>0.5){wc.style.display='';wc.className='chip bad';
+    wc.textContent='WS CLAMP '+(WSEMA.left>0.5?'L':'')+(WSEMA.right>0.5?'R':'')+' — mapping off? recalibrate'}
+   else wc.style.display='none';
    updCalib(s);
    drawHands(s);drawRobot(s,d.mesh_T,d.hand_mesh,d.hand_T);drawOverlay(s,d.mesh_T,d.hand_mesh,d.hand_T);
    $('cardL').innerHTML=card('left',s);$('cardR').innerHTML=card('right',s);

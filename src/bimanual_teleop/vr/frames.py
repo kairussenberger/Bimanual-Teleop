@@ -177,6 +177,38 @@ def rotvec(R: np.ndarray) -> np.ndarray:
     return ang / (2.0 * np.sin(ang)) * v
 
 
+def lateral_curve(x: float, s: float, lat_ref: float, lat_knots=None) -> float:
+    """The calibrated LATERAL map: operator lateral offset from their measured
+    midline `x` → robot lateral (robot-midline-centred). ONE implementation
+    shared by the live mapper (ClutchMapper._lat_scaled) and the calibration
+    quality grader (vr/neutral_calib) so residuals are measured through
+    exactly the map the runtime will apply.
+
+    With knots: piecewise-linear |x|→|out| through (0,0), (x_clap → contact
+    half-gap) and (x_spread → robot half-spread), extended with the last
+    slope — the operator's clap maps to the robot's hands touching, their
+    full spread to the robot's full spread, by construction. Without knots:
+    QUADRATIC ramp from 1:1 at the midline to full scale `s` at |x| ≥ lat_ref
+    for expanding scales (a linear ramp still amplified a real clap ×1.26 —
+    measured); linear ramp for shrinking scales (the quadratic form would
+    fold the map below s ≈ 0.67)."""
+    if lat_knots is not None:
+        (xc, yc), (xa, ya) = lat_knots
+        ax = abs(x)
+        if ax <= xc:
+            out = ax * (yc / xc)
+        elif ax <= xa:
+            out = yc + (ax - xc) * (ya - yc) / (xa - xc)
+        else:
+            out = ya + (ax - xa) * (ya - yc) / (xa - xc)
+        return float(np.sign(x) * out)
+    if lat_ref <= 0.0:
+        return s * x
+    a = min(abs(x) / lat_ref, 1.0)
+    ramp = a * a if s >= 1.0 else a
+    return (1.0 + (s - 1.0) * ramp) * x
+
+
 # --------------------------------------------------------------------------- #
 # SE3 / SO3 — minimal pose types with the mink API surface this repo uses,
 # decoupled from any IK backend. The Pinocchio/pink solver is touched ONLY at the
@@ -349,34 +381,11 @@ class ClutchMapper:
         return self.anchor_ctrl is not None
 
     def _lat_scaled(self, lat: float) -> float:
-        """Lateral component with the non-linear ramp, about the OPERATOR'S
-        measured midline (lat_center — the ORBIT anchor shifts it): s_eff = 1
-        at the midline → axis_scale[0] at |lat − center| ≥ lat_ref, output
-        centered on the ROBOT midline. QUADRATIC ramp for expanding scales
-        (stays ≈1:1 through clap-width laterals — measured: a linear ramp still
-        amplified a real clap ×1.26); linear ramp for shrinking scales (the
-        quadratic form would fold the map below s ≈ 0.67)."""
-        s = float(self.axis_scale[0])
-        x = lat - self.lat_center
-        if self.lat_knots is not None:
-            # Piecewise-linear |x|→|out| through (0,0), (x_clap → CONTACT half-gap)
-            # and (x_spread → robot half-spread), extended with the last slope:
-            # the operator's measured clap maps to the robot's hands touching,
-            # their full spread to the robot's full spread — by construction.
-            (xc, yc), (xa, ya) = self.lat_knots
-            ax = abs(x)
-            if ax <= xc:
-                out = ax * (yc / xc)
-            elif ax <= xa:
-                out = yc + (ax - xc) * (ya - yc) / (xa - xc)
-            else:
-                out = ya + (ax - xa) * (ya - yc) / (xa - xc)
-            return float(np.sign(x) * out)
-        if self.lat_ref <= 0.0:
-            return s * x
-        a = min(abs(x) / self.lat_ref, 1.0)
-        ramp = a * a if s >= 1.0 else a
-        return (1.0 + (s - 1.0) * ramp) * x
+        """Lateral component about the OPERATOR'S measured midline (lat_center —
+        the ORBIT anchor shifts it), centred on the ROBOT midline. The curve
+        itself lives in `lateral_curve` (shared with the calibration grader)."""
+        return lateral_curve(lat - self.lat_center, float(self.axis_scale[0]),
+                             self.lat_ref, self.lat_knots)
 
     def _p_abs(self, ctrl: SE3) -> np.ndarray:
         w = ctrl.translation()

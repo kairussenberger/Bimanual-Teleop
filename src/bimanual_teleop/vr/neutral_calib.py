@@ -52,6 +52,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import SIDES
+from .frames import lateral_curve
 
 # Capture gates.
 HOLD_S = 2.5          # continuous still time to accept each pose
@@ -107,6 +108,7 @@ class CalibResult:
                 "lat_center": round(float(self.lat_center), 3),
                 "lat_knots": ([[round(float(v), 3) for v in k] for k in self.lat_knots]
                               if self.lat_knots else None),
+                "quality": self.meta.get("quality"),
                 "stamp": self.meta.get("stamp")}
 
     def save(self, path: str | Path) -> None:
@@ -189,6 +191,55 @@ def _reyaw(v: np.ndarray, f2: np.ndarray, r2: np.ndarray) -> np.ndarray:
     return np.array([float(xz @ r2), v[1], float(xz @ f2)])
 
 
+def _fit_quality(A, B, rbN, rbR, scale, raw_scale, off, lat_center, lat_ref,
+                 lat_knots, ps) -> dict:
+    """Grade a fit ON THE SPOT, through exactly the map the runtime will apply
+    (shared `lateral_curve`). The 2026-06-11 floating-arms regression was only
+    discoverable by post-mortem forensics on a recording — these numbers make a
+    broken fit visible in the completion banner instead.
+
+    - NEUTRAL residual (3D, per side): the held extended pose vs the robot
+      neutral. The fit anchors the MEAN here by construction, so what remains
+      is left/right asymmetry of the capture (and the lateral knot anchoring).
+    - REST residual (up/forward only, per side): the rest pose vs the robot
+      rest through the fitted scales. LATERAL is excluded by design — the
+      lateral map is anchored at clap width and extended spread, and an
+      operator's at-rest hand width is genuinely outside its claim.
+    - CLIPPED scales: a raw scale outside [SCALE_MIN, SCALE_MAX] means the
+      capture geometry disagreed with the robot references beyond what the
+      model may express — the clipped value WILL mis-map proportionally."""
+    def mapped(v):
+        return ps * np.array([
+            lateral_curve(float(v[0]) - lat_center, float(scale[0]), lat_ref, lat_knots),
+            float(scale[1]) * float(v[1]) + float(off[1]),
+            float(scale[2]) * float(v[2]) + float(off[2])])
+
+    res = {"neutral": {}, "rest": {}}
+    worst = 0.0
+    for s in SIDES:
+        rn = float(np.linalg.norm(mapped(A[s]) - rbN[s]))
+        rr = float(np.linalg.norm((mapped(B[s]) - rbR[s])[1:]))
+        res["neutral"][s] = round(rn * 100, 1)                       # cm
+        res["rest"][s] = round(rr * 100, 1)
+        worst = max(worst, rn, rr)
+    reasons = [f"{s} {name} residual {cm:.0f} cm"
+               for name, side_res in res.items()
+               for s, cm in side_res.items() if cm > 5.0]
+    clipped, badly_clipped = [], False
+    for i, axis in enumerate(("lat", "up", "reach")):
+        r = float(raw_scale[i])
+        excess = max(SCALE_MIN / r if r > 0 else np.inf, r / SCALE_MAX)
+        clipped.append(bool(excess > 1.0 + 1e-9))
+        if clipped[-1]:
+            reasons.append(f"{axis} scale clipped (raw {r:.2f})")
+            badly_clipped = badly_clipped or excess > 1.15
+    grade = ("bad" if worst > 0.10 or badly_clipped
+             else ("check" if reasons else "good"))
+    return {"grade": grade, "worst_cm": round(worst * 100, 1), "reasons": reasons,
+            "residual_cm": res, "scale_raw": [round(float(r), 3) for r in raw_scale],
+            "clipped": clipped}
+
+
 def fit_two_pose(pose_a: dict[str, np.ndarray], pose_b: dict[str, np.ndarray],
                  robot_neutral: dict[str, np.ndarray], robot_rest: dict[str, np.ndarray],
                  pos_scale: float = 1.0, pose_c: dict[str, np.ndarray] | None = None,
@@ -220,7 +271,8 @@ def fit_two_pose(pose_a: dict[str, np.ndarray], pose_b: dict[str, np.ndarray],
         return None
     s_up = float(np.mean([rbN[s][1] - rbR[s][1] for s in SIDES])) / d_up
     s_fwd = float(np.mean([rbN[s][2] - rbR[s][2] for s in SIDES])) / d_fwd
-    scale = np.clip(np.array([s_lat, s_up, s_fwd]), SCALE_MIN, SCALE_MAX)
+    scale_raw = np.array([s_lat, s_up, s_fwd])
+    scale = np.clip(scale_raw, SCALE_MIN, SCALE_MAX)
 
     lat_center = 0.5 * (A["right"][0] + A["left"][0])    # operator midline (incl. anchor)
     lat_knots = None
@@ -244,7 +296,10 @@ def fit_two_pose(pose_a: dict[str, np.ndarray], pose_b: dict[str, np.ndarray],
     if not np.all(np.isfinite(off)):
         return None
     off[0] = 0.0                                          # lateral handled by lat_center
+    quality = _fit_quality(A, B, rbN, rbR, scale, scale_raw, off, lat_center,
+                           spread_a / 2.0, lat_knots, ps)
     meta = {"stamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "quality": quality,
             "pose_a": {s: [round(float(v), 4) for v in A[s]] for s in SIDES},
             "pose_b": {s: [round(float(v), 4) for v in B[s]] for s in SIDES},
             "pose_c": ({s: [round(float(v), 4) for v in C[s]] for s in SIDES}
@@ -392,9 +447,15 @@ class NeutralPoseCalibration:
         self.active = False
         self.phase = "done"
         sc = res.axis_scale
-        self._msg = (f"CALIBRATED ✓ scale lat {sc[0]:.2f} / up {sc[1]:.2f} / reach {sc[2]:.2f}, "
+        q = (res.meta or {}).get("quality") or {}
+        grade = q.get("grade", "?")
+        mark = {"good": "✓", "check": "⚠", "bad": "✗"}.get(grade, "✓")
+        fit = f" · fit {grade.upper()} (worst {q.get('worst_cm', '?')} cm)"
+        if grade != "good" and q.get("reasons"):
+            fit += f" — {q['reasons'][0]}"
+        self._msg = (f"CALIBRATED {mark} scale lat {sc[0]:.2f} / up {sc[1]:.2f} / reach {sc[2]:.2f}, "
                      f"midline {res.lat_center:+.2f} m"
-                     + ("" if res.lat_knots else " (no clap anchor)"))
+                     + ("" if res.lat_knots else " (no clap anchor)") + fit)
 
     # ---- display ----------------------------------------------------------- #
     def status(self, t: float) -> dict:

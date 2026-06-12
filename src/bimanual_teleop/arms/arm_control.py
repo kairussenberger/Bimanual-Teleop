@@ -106,6 +106,11 @@ class ArmController:
         self._was_engaged = False
         self.cmd_R = None   # last commanded EE orientation (base frame) — for the on-screen viz
         self.cmd_pos = None  # last commanded EE position (base frame) after workspace/cross clamps
+        # Live calibration-health signal: how far the raw mapped target sat
+        # OUTSIDE the workspace box this tick (0 inside). Sustained large values
+        # mean the mapping is off — a stale/broken calibration pins targets at
+        # the box face (the 2026-06-11 failure mode), it never just "feels far".
+        self.clamp_dist = 0.0
         # --- motion guardrails (safety section) ------------------------------ #
         # Target governor: world-frame caps on how fast the COMMANDED target may
         # move/turn, plus teleport rejection. Real operator motion peaks ≈2 m/s;
@@ -255,6 +260,7 @@ class ArmController:
             self._prev_wrist = None
         self._was_engaged = active
         if not active:
+            self.clamp_dist = 0.0
             return None
         # Teleport rejection on the OPERATOR signal (body-frame wrist sample,
         # real metres): tracking glitches measured 58–65 m/s vs ≤2 m/s for real
@@ -273,6 +279,7 @@ class ArmController:
         self._prev_wrist = (w_now.copy(), float(t))
         target = self.mapper.target(mat_to_se3(hand.wrist), t)
         p = np.clip(target.translation(), self.ws_min, self.ws_max)  # workspace box
+        self.clamp_dist = float(np.linalg.norm(target.translation() - p))
         sm = self.pos_filt({"x": p[0], "y": p[1], "z": p[2]}, t)     # One-Euro
         pb = np.array([sm["x"], sm["y"], sm["z"]])                   # target in base frame
         pw = self.base_R @ pb + self.base_pos                        # → world
