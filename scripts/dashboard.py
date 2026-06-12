@@ -476,7 +476,7 @@ function updCalib(st){
   const q=applied.quality||null,gr=q?q.grade:null;
   hc.style.display='';hc.className='chip '+(gr==='bad'?'bad':gr==='check'?'warn':'ok');
   hc.title='body offset [r,u,f]: '+JSON.stringify(applied.body_offset)
-    +(q&&q.reasons&&q.reasons.length?'\nfit: '+q.reasons.join('; '):'');
+    +(q&&q.reasons&&q.reasons.length?' · fit: '+q.reasons.join('; '):'');
   hc.textContent='CAL '+(gr==='bad'?'✗':gr==='check'?'⚠':'✓')+' lat ×'+applied.axis_scale[0].toFixed(2)
     +' / reach ×'+applied.axis_scale[2].toFixed(2)+(q&&q.worst_cm!=null?' · ±'+q.worst_cm+'cm':'')}
  else if(c&&c.msg){hc.style.display='';hc.className='chip warn';hc.textContent='calib: '+c.msg}
