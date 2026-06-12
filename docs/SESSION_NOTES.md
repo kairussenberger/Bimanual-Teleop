@@ -661,3 +661,50 @@ Gate after both fixes: **189 tests + all probes green.**
 - Killed a 4-day-old orphaned `orbit_to_unity.py --debug` (old
   `orca-teleop-unity` project) that was squatting on all seven ORBIT ports
   and blocking the dashboard's engine spawns.
+
+---
+
+## 2026-06-12 (late afternoon) — S-curve motion smoothing: accel-bounded governor + shaper
+
+User report: motion reads "blocky" — targets glide at constant max speed with
+instant starts/stops (rectangle velocity profile). Goal: the classic smooth
+second-order step response, accepting a little lag/slower following. Also:
+verify the speed limiting is per-SECOND (frame-rate independent), not
+per-frame, so sim behavior translates to the real frame.
+
+**Root cause.** Two hard clamps with infinite acceleration at the corners:
+`_govern`'s `speed·dt` position clamp (orientation had a first-order blend —
+smooth decay but instant velocity ONSET), and the joint shaper's stiff
+`kp = ω²` slamming velocity to `rate_limit` in ~6 ms before cruising.
+
+**Change.**
+- `safety/shaper.py` — optional `accel_limit` (rad/s²): PD accel is clipped
+  before integrating, so velocity RAMPS to the cap and back (S-curve onset,
+  critically-damped no-overshoot landing). No-overshoot bound documented:
+  accel ≥ 0.37·rate·ω; rig defaults carry ≥1.4× margin. Class default None
+  (legacy); both call sites pass config values.
+- `arms/arm_control.py` `_govern` — rewritten as a critically-damped
+  second-order TRACKER for position and attitude (SO(3), world-frame rotvec
+  error, angular-velocity state) under norm-clipped velocity AND acceleration
+  caps, sub-stepped with real dt (stable across hiccups, identical at any
+  loop rate). Teleport rejection unchanged. Legacy `target_ori_smooth_s` τ
+  still honored (ω = 2/τ) when `target_ori_smooth_hz` is absent.
+- `config/rig.yaml` — new: `target_accel_max: 5.0` m/s²,
+  `target_smooth_hz: 2.0`, `target_ang_accel_max: 25.0` rad/s²,
+  `sim_accel_limit: 25.0`, `hardware.accel_limit: 12.0`.
+- Tests: +5 (shaper accel ramp + frame-rate independence; governor linear +
+  angular accel bounds; end-to-end governed-motion rate independence).
+  267 pass; `verify_stack.py` green.
+
+**Measured cost/benefit (library tapes, all 6 PASS).** Correspondence during
+fast translation: reach_box 1.2→7.2 cm, pick_place →7.0 cm median (the
+expected tracker lag — user explicitly accepted); slow/parked tapes stay at
+0.2–3.0 cm. Orientation overlay 2.8°→2.65° and IK tracking 4.0°→2.0°
+medians IMPROVED on reach_box (smooth demands are easier to solve).
+
+**Follow-ups.** Re-pin the REPLAY_LIBRARY.md score table + re-render the
+movies (the table's provenance note anticipated this rework; the render
+agent was mid-flight on the OLD dynamics for 5/6 GIFs — fingers.npz picked
+up the new config). Feel-test on the headset: if following feels laggy,
+raise `target_smooth_hz` (2.0 → 2.5–3.0) and keep
+`target_accel_max ≥ 0.37·speed·ω` for the no-overshoot margin.

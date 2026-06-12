@@ -88,7 +88,8 @@ degrees (never goes through arm IK).
 | 9 | Soft joint limits + elbow floor | `arms/ik.py` | home ± measured-workspace margins; j3 floor prevents hyperextension | `test_limit_margins_and_within_limits` |
 | 10 | j6 roll saturation | `arms/ik.py` swing–twist | roll beyond the ±120° motor range pins j6 gracefully; NEVER smeared onto j4/j5 | `test_roll_beyond_j6_range_saturates_without_contortion` |
 | 11 | IK velocity budget | `arms/ik.py` | per-joint `ik.max_vel`, derated ×`hardware.max_vel_scale` on run_hw | run_hw derate print |
-| 12 | **Command shaper** | `safety/shaper.py` @ `HardwareSink` | every CAN command limit-clamped to the PHYSICAL hardstops, speed-capped (`hardware.rate_limit`), critically-damped PD smoothing, init from measured pose, NaN ⇒ hold | `tests/test_shaper.py` (6 tests) |
+| 11b | **Target governor** | `arm_control.py` `_govern` | critically-damped second-order tracker of the commanded EE target (position AND attitude) under per-second velocity + ACCELERATION caps (`target_speed_max`/`target_accel_max`, `target_ang_speed_max`/`target_ang_accel_max`) — demands leave as smooth S-curves, never rectangle-velocity "blocky" glides; teleport-speed input (`target_jump_speed`) re-anchors instead of moving; frame-rate independent (sub-stepped real-dt integration) | `tests/test_guardrails.py` governor accel/speed/teleport/rate-independence |
+| 12 | **Command shaper** | `safety/shaper.py` @ `HardwareSink` | every CAN command limit-clamped to the PHYSICAL hardstops, speed-capped (`hardware.rate_limit`), acceleration-capped (`hardware.accel_limit` — velocity ramps, never slams), critically-damped PD smoothing, init from measured pose, NaN ⇒ hold | `tests/test_shaper.py` (8 tests) |
 | 13 | Motor-side backstops | YAM firmware | MIT-mode PD + 400 ms motor watchdog (commands stop ⇒ motors stop) | hardware-day check |
 
 Order matters: 1–5 decide *whether* to follow, 6–11 decide *where* to go, 12–13

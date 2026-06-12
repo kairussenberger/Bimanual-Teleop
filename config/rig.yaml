@@ -155,20 +155,33 @@ safety:
   # to CONTACT distance — palms, fingers, or fingertips-to-palm — never through.
   hand_min_separation: 0.12
   hand_capsule_len: 0.19
-  # Motion guardrails (sim AND the gateway to hardware):
+  # Motion guardrails (sim AND the gateway to hardware). Every cap below is per
+  # SECOND of wall-clock time (integrated with the real dt), NOT per frame — the
+  # governed motion is identical at any loop/headset rate, so what the sim shows
+  # is what the real frame does.
   # - target_speed_max / target_ang_speed_max cap how fast the commanded EE
   #   target may translate/rotate (operator p99 measured ≈2 m/s).
+  # - target_accel_max / target_ang_accel_max bound ACCELERATION too: the
+  #   governor is a critically-damped second-order tracker, so a demand leaves
+  #   as a smooth S-curve (velocity ramps in, cruises, lands without overshoot)
+  #   instead of the old rectangle-velocity "blocky" glide. Trades a little lag
+  #   (~5 cm at 0.3 m/s following) for smooth, hardware-friendly motion.
+  #   No-overshoot bound: keep accel ≥ 0.37·speed_max·(2π·smooth_hz); the
+  #   values below carry ≥1.3× margin.
   # - target_jump_speed: implied speeds above this are NOT movements (tracking
   #   glitches measured 58–65 m/s) — the mapper re-anchors and the arm GLIDES;
   #   the violent motion simply never happens.
-  # - sim_rate_limit / sim_smooth_hz: the hardware-style joint command shaper now
-  #   ALSO runs in the sim/render path — published joints can never move faster
-  #   than this, whatever the IK does (singularity flips leave as bounded
-  #   glides). Set sim_rate_limit to hardware.rate_limit (1.2) for exact
-  #   real-robot motion parity before a hardware day.
+  # - sim_rate_limit / sim_smooth_hz / sim_accel_limit: the hardware-style joint
+  #   command shaper now ALSO runs in the sim/render path — published joints can
+  #   never move (or jerk) faster than this, whatever the IK does (singularity
+  #   flips leave as bounded glides). Set sim_rate_limit to hardware.rate_limit
+  #   (1.2) for exact real-robot motion parity before a hardware day.
   target_speed_max: 0.8
+  target_accel_max: 5.0       # m/s² — ramps to full speed in ~0.16 s
+  target_smooth_hz: 2.0       # position tracker bandwidth (critically damped)
   target_jump_speed: 3.0
   target_ang_speed_max: 2.5
+  target_ang_accel_max: 25.0  # rad/s² — ramps to full turn rate in ~0.1 s
   # Mid-session ANCHOR-JUMP guard (safety/anchor_guard.py): a recenter, app
   # restart, or headset sleep moves the ORBIT stream anchors and silently
   # invalidates the applied calibration — the guard watches the body-relative
@@ -186,12 +199,15 @@ safety:
     coherence_tol: 0.15     # m — both-side jump similarity = shared-anchor event
     max_sample_gap_s: 0.3   # continuity expires across longer per-side gaps (dropout)
     blackout_s: 2.0         # live transports: whole stream dead this long → trip
-  # Attitude low-pass time constant (s): raw Quest wrist quats carry ~200°/s of
+  # Attitude tracker bandwidth: raw Quest wrist quats carry ~200°/s of
   # high-frequency jitter (worse when the palm rotates away from the cameras);
-  # the commanded attitude slerps toward the demand with this τ. 0 disables.
+  # the second-order tracker rolls it off at −40 dB/decade. target_ori_smooth_hz
+  # sets the bandwidth directly; if absent it derives from the legacy
+  # target_ori_smooth_s first-order τ (ω = 2/τ, matching the old settle time).
   target_ori_smooth_s: 0.12
   sim_rate_limit: 1.8
   sim_smooth_hz: 4.0
+  sim_accel_limit: 25.0   # rad/s² joint accel cap (no-overshoot needs ≥ 0.37·rate·2π·hz ≈ 17)
   workspace:          # axis-aligned EE target bounds in arm base frame (m)
     min: [-0.6, -0.85, -0.6]   # y-min lowered: arms-down home wrist sits at base-y≈-0.56;
     max: [0.6, 0.7, 0.6]       # old -0.2 clipped it +0.36m on engage -> arms curled to center
@@ -204,6 +220,8 @@ hardware:
   max_vel_scale: 0.35 # derate ik.max_vel for real motors (sim keeps full speed)
   rate_limit: 1.2     # rad/s hard per-joint speed cap at the CAN boundary
   smooth_hz: 3.0      # critically-damped command tracker bandwidth (the "PD" feel)
+  accel_limit: 12.0   # rad/s² per-joint accel cap — velocity RAMPS, never slams
+                      # (no-overshoot needs ≥ 0.37·rate·2π·hz ≈ 8.4; 1.4× margin)
 
 vr:
   transport: fake     # 'fake' (synthetic, no headset) or 'vuer' (real Quest WebXR)

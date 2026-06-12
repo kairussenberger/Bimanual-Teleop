@@ -90,6 +90,86 @@ def test_governor_caps_angular_speed():
         t += DT
 
 
+def test_governor_bounds_target_acceleration():
+    """The smoothing contract: the governed target's velocity may never JUMP —
+    it ramps at ≤ target_accel_max (S-curve onset/landing), so a fast operator
+    sweep leaves as the smooth second-order response, not the old
+    rectangle-velocity 'blocky' glide."""
+    rig = load_rig()
+    ac = ArmController(rig, "right")
+    a_max = float(rig["safety"]["target_accel_max"])
+    t = 0.0
+    for _ in range(240):                       # settle the engage glide fully
+        ac.plan(_hs([0.25, 0.0, 0.30]), True, t)
+        t += DT
+    p, prev_p, prev_v = np.array([0.25, 0.0, 0.30]), None, None
+    first_tick_speed = None
+    for i in range(360):                       # 1.8 m/s sweep, then a hard stop
+        if i < 240:
+            p = p + np.array([0.0, 0.015, 0.0])
+        plan = ac.plan(_hs(p), True, t)
+        if prev_p is not None:
+            v = (plan["pw"] - prev_p) / DT
+            if first_tick_speed is None:
+                first_tick_speed = float(np.linalg.norm(v))
+            if prev_v is not None:
+                dv = float(np.linalg.norm(v - prev_v)) / DT
+                assert dv <= a_max * 1.10 + 1e-6, \
+                    f"target accelerated at {dv:.1f} m/s² on tick {i}"
+            prev_v = v
+        prev_p = plan["pw"]
+        t += DT
+    # the sweep starts from rest: the very first tick must NOT already move at
+    # full speed (that instant jump is exactly the old blockiness)
+    assert first_tick_speed <= a_max * DT * 2.0, \
+        f"first tick already at {first_tick_speed:.2f} m/s — velocity slammed, not ramped"
+
+
+def test_governor_bounds_angular_acceleration():
+    rig = load_rig()
+    ac = ArmController(rig, "right")
+    aw_max = float(rig["safety"]["target_ang_accel_max"])
+    t = 0.0
+    for _ in range(240):
+        ac.plan(_hs([0.25, 0.0, 0.30]), True, t)
+        t += DT
+    prev_R, prev_w = None, None
+    for i in range(240):                       # 12 rad/s roll demand, then hold
+        R = _rotx(min(12.0 * (i + 1) * DT, 3.0))
+        plan = ac.plan(_hs([0.25, 0.0, 0.30], R), True, t)
+        R_w = ac.base_R @ plan["R"].as_matrix()
+        if prev_R is not None:
+            d = prev_R.T @ R_w
+            ang = float(np.arccos(np.clip((np.trace(d) - 1) / 2, -1, 1)))
+            w = ang / DT
+            if prev_w is not None:
+                assert abs(w - prev_w) / DT <= aw_max * 1.15 + 1e-6, \
+                    f"attitude rate jumped {abs(w - prev_w)/DT:.0f} rad/s² on tick {i}"
+            prev_w = w
+        prev_R = R_w
+        t += DT
+
+
+def test_governed_motion_is_frame_rate_independent():
+    """The caps are m/s and m/s², NOT metres-per-frame: the same operator
+    trajectory sampled at 120 Hz and 40 Hz must govern to the same target —
+    the irl frame moves identically whatever rate the loop achieves."""
+    rig = load_rig()
+
+    def run(hz: int) -> np.ndarray:
+        ac = ArmController(rig, "right")
+        n, t, plan = int(3.0 * hz), 0.0, None
+        for i in range(n):
+            t = i / hz
+            # smooth 0.2 m sweep over 1 s, then hold still for 2 s
+            s = min(t, 1.0)
+            p = np.array([0.25, 0.2 * (3 * s * s - 2 * s ** 3), 0.30])
+            plan = ac.plan(_hs(p), True, t)
+        return plan["pw"]
+
+    np.testing.assert_allclose(run(120), run(40), atol=5e-3)
+
+
 # --------------------------------------------------------------------------- #
 # in-loop joint shaper
 # --------------------------------------------------------------------------- #
