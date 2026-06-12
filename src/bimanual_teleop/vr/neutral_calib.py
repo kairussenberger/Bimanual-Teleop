@@ -111,20 +111,24 @@ class CalibResult:
                 "quality": self.meta.get("quality"),
                 "stamp": self.meta.get("stamp")}
 
+    def payload(self) -> dict:
+        """The canonical persisted form — written to disk by save() and EMBEDDED
+        in session recordings (vr/replay.py), so one parser handles both."""
+        return {"version": 4,
+                "axis_scale": [float(v) for v in self.axis_scale],
+                "body_offset": [float(v) for v in self.body_offset],
+                "lat_ref": float(self.lat_ref),
+                "lat_center": float(self.lat_center),
+                "lat_knots": ([[float(v) for v in k] for k in self.lat_knots]
+                              if self.lat_knots else None),
+                "forward_body": ([float(v) for v in self.forward_body]
+                                 if self.forward_body else None),
+                "meta": self.meta}
+
     def save(self, path: str | Path) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": 4,
-                   "axis_scale": [float(v) for v in self.axis_scale],
-                   "body_offset": [float(v) for v in self.body_offset],
-                   "lat_ref": float(self.lat_ref),
-                   "lat_center": float(self.lat_center),
-                   "lat_knots": ([[float(v) for v in k] for k in self.lat_knots]
-                                 if self.lat_knots else None),
-                   "forward_body": ([float(v) for v in self.forward_body]
-                                    if self.forward_body else None),
-                   "meta": self.meta}
-        p.write_text(json.dumps(payload, indent=2) + "\n")
+        p.write_text(json.dumps(self.payload(), indent=2) + "\n")
 
 
 def load_calibration(path: str | Path) -> CalibResult | None:
@@ -134,10 +138,18 @@ def load_calibration(path: str | Path) -> CalibResult | None:
     if not p.exists():
         return None
     try:
-        d = json.loads(p.read_text())
+        return parse_calibration(json.loads(p.read_text()))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def parse_calibration(d: dict) -> CalibResult | None:
+    """Validate a calibration payload (persisted file OR embedded in a
+    recording); None when implausible — corrupt data must never steer arms."""
+    try:
         scale = np.asarray(d["axis_scale"], dtype=float).reshape(3)
         off = np.asarray(d["body_offset"], dtype=float).reshape(3)
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+    except (KeyError, TypeError, ValueError):
         return None
     if not (np.all(np.isfinite(scale)) and np.all(np.isfinite(off))):
         return None

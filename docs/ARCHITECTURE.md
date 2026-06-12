@@ -104,6 +104,7 @@ bound *how fast anything can physically move* no matter what upstream does.
 | Keyboard jog (sim→real verification) | `uv run python scripts/jog_arms.py [--sink hw]` |
 | Record a headset session | `run_teleop --vr orbit --record recordings/s.npz` |
 | Score a recording vs the contracts | `uv run python scripts/analyze_session.py recordings/s.npz` |
+| Curate a tape (trim, embed its session fit) | `uv run python scripts/trim_session.py recordings/s.npz --tail 4 [--calib fit.json]` |
 | Watchable movie (hands vs robot meshes) | `uv run --with matplotlib python scripts/render_session.py recordings/s.npz --gif out/s.gif` |
 | Rerun 3D viewer (live or replay) | `run_teleop --vr replay s.npz --viz` |
 | Quest ingest diagnostics | `scripts/check_quest.py`, `scripts/check_roll.py` |
@@ -125,9 +126,12 @@ HardwareSink. In order:
    matches the dashboard/sim, speed feels like the shaper cap (`rate_limit` 1.2
    rad/s default — slow), hardstops respected. THIS is the sim→real transfer
    check, with your hand on the e-stop.
-5. **Replay on hardware**: `run_hw --vr replay recordings/roll_right.npz`
-   — a session you have already watched in sim, now on metal. No surprises
-   allowed: same motion, slower (derated).
+5. **Replay on hardware**: `run_hw --vr replay recordings/roll_right_left.npz`
+   — a curated tape you have already watched in sim (see
+   docs/REPLAY_LIBRARY.md; tapes embed their session calibration), now on
+   metal. No surprises allowed: same motion, slower (derated). Then
+   reach_box.npz, wrist_swing.npz; clap.npz only after the crossing issue is
+   closed.
 6. **Live teleop, gesture clutch**: `run_hw --vr orbit --clutch gesture`.
    Engage one hand at a time. Verify dropout HOLD by covering a hand; verify
    deadman by un-pinching; verify Ctrl+C releases torque.

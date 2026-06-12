@@ -44,7 +44,8 @@ from .safety.separation import separate_capsules
 from .vr.calibrate import (Calibrator, R_base_from_body, body_relative_hand_sample,
                            head_op_axes)
 from .vr.frames import HandSample, VRFrame
-from .vr.neutral_calib import NeutralPoseCalibration, load_calibration
+from .vr.neutral_calib import (NeutralPoseCalibration, load_calibration,
+                               parse_calibration)
 
 
 class TeleopEngine:
@@ -73,6 +74,7 @@ class TeleopEngine:
         # --- operator neutral-pose calibration (position-only, runtime) ----- #
         self.neutral = NeutralPoseCalibration(rig)
         self.calib_summary: dict | None = None     # applied scale/offset, for the dashboard chip
+        self.calib_result = None                   # full applied CalibResult (recorder embeds it)
         # SAFETY — mid-session anchor-jump guard (safety/anchor_guard.py): a
         # recenter/app-restart/headset-sleep moves the stream anchors and makes
         # the applied fit silently wrong. Constructed BEFORE the auto-load below
@@ -92,6 +94,18 @@ class TeleopEngine:
             res = load_calibration(self._calib_file)
             if res is not None:
                 self._apply_calibration(res, announce=f"loaded {self._calib_file}")
+        # A recording's own EMBEDDED fit beats everything: it is what actually
+        # ran while the session was captured, and raw ORBIT frames are only
+        # meaningful together with it (anchors move metres between sessions).
+        # run_teleop/analyze inject it for replay; deterministic — it's file data.
+        emb = rig.get("vr", {}).get("_embedded_calib")
+        if emb:
+            res = parse_calibration(emb)
+            if res is not None:
+                self._apply_calibration(res, announce="embedded in recording")
+            else:
+                print("[calib] recording embeds a calibration that fails the "
+                      "load screen — replaying IDENTITY", flush=True)
         # SAFETY — body-frame yaw lock: head ROTATION must never drive the arms
         # (head POSITION already cancels in the body-relative subtraction). The
         # yaw frame is latched from the first head sample and re-latched to the
@@ -243,6 +257,7 @@ class TeleopEngine:
                                                getattr(res, "lat_center", 0.0),
                                                getattr(res, "lat_knots", None))
         self.calib_summary = res.summary()
+        self.calib_result = res
         # The fit absorbs whatever the anchors are NOW — forgive any latched
         # trip and reseed continuity (the yaw re-latch that may follow changes
         # the body axes under the watched signal).
@@ -269,6 +284,7 @@ class TeleopEngine:
             for s in SIDES:
                 self.arm[s].mapper.set_calibration(np.ones(3), np.zeros(3), 0.0, 0.0, None)
             self.calib_summary = None
+            self.calib_result = None
             if self._calib_file is not None:
                 try:
                     self._calib_file.unlink(missing_ok=True)
