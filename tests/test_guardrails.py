@@ -156,6 +156,45 @@ def test_closest_points_crossing_segments():
     np.testing.assert_allclose(cr, [0, 0, 0.2], atol=1e-9)
 
 
+def test_full_clasp_push_is_lateral_not_shear():
+    """The 'crossing hands' clap bug (reported live 2026-06-12, measured on
+    clap.npz: 48% of pushes were majority fore/aft+vertical SHEAR): real
+    clasped hands are near-parallel but staggered, the closest pair sits at
+    fingertip-vs-palm, and the gradient axis shears the hands past each other.
+    Near-parallel capsules must resolve along the WRIST line instead."""
+    w_l = np.array([0.02, -0.05, 1.0])
+    w_r = np.array([-0.03, 0.05, 0.97])              # staggered, 10 cm lateral
+    d_l = np.array([-0.94, 0.20, -0.28]); d_l = d_l / np.linalg.norm(d_l)
+    d_r = np.array([-0.90, -0.25, -0.36]); d_r = d_r / np.linalg.norm(d_r)   # ~26° apart
+    n_l, n_r = separate_capsules(w_l, w_r, d_l, d_r, 0.19, 0.12)
+    cl, cr = closest_points_segments(n_l, n_l + d_l * 0.19, n_r, n_r + d_r * 0.19)
+    assert np.linalg.norm(cr - cl) >= 0.12 - 1e-9
+    wrist_line = (w_r - w_l) / np.linalg.norm(w_r - w_l)
+    push_r = n_r - w_r
+    push_l = n_l - w_l
+    # the pair must separate ALONG ITS OWN LINE (apart), not slide past each
+    # other on the gradient's fore/aft tilt
+    assert push_r @ wrist_line > 0.9 * np.linalg.norm(push_r)
+    assert -push_l @ wrist_line > 0.9 * np.linalg.norm(push_l)
+    assert n_r[1] - n_l[1] > w_r[1] - w_l[1], "hands must move APART laterally"
+
+
+def test_perpendicular_poke_keeps_gradient_axis():
+    """A fingertip poke INTO the other palm (axes ~orthogonal) genuinely needs
+    the closest-point axis — pushing laterally would let the poke advance."""
+    w_l = np.array([0.0, -0.30, 1.0])
+    d_l = np.array([0.0, 1.0, 0.0])                  # left fingers point right…
+    w_r = np.array([-0.02, -0.06, 1.0])
+    d_r = np.array([-1.0, 0.0, 0.0])                 # …into the right palm (fwd axis)
+    cl0, cr0 = closest_points_segments(w_l, w_l + d_l * 0.19, w_r, w_r + d_r * 0.19)
+    grad = (cr0 - cl0) / np.linalg.norm(cr0 - cl0)
+    n_l, n_r = separate_capsules(w_l, w_r, d_l, d_r, 0.19, 0.12)
+    cl, cr = closest_points_segments(n_l, n_l + d_l * 0.19, n_r, n_r + d_r * 0.19)
+    assert np.linalg.norm(cr - cl) >= 0.12 - 1e-9
+    push_r = n_r - w_r
+    assert push_r @ grad > 0.8 * np.linalg.norm(push_r), "poke must resolve along the gradient"
+
+
 # --------------------------------------------------------------------------- #
 # j6 saturation hysteresis (the left-roll pivot from live_0611_133349)
 # --------------------------------------------------------------------------- #
